@@ -1,0 +1,2 @@
+# Required for PDF text extraction. Search and GUI otherwise use the Python standard library.
+pypdf>=5,<7

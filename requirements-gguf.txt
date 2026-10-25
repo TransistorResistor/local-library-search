@@ -1,0 +1,2 @@
+# Optional native runtime for local model inference.
+llama-cpp-python>=0.3.16,<0.4

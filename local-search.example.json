@@ -1,0 +1,31 @@
+{
+  "database": "data/library.sqlite3",
+  "sources": [
+    {
+      "name": "webclips",
+      "type": "clipper",
+      "path": "C:/Library/clipper.sqlite3",
+      "closed_snapshot": false
+    },
+    {
+      "name": "papers",
+      "type": "folder",
+      "path": "C:/Library/PDFs",
+      "ascii_ratio": 0.8,
+      "min_words": 20,
+      "max_file_mb": 200,
+      "max_pages": 2000
+    }
+  ],
+  "model": {
+    "path": "C:/Models/model.gguf",
+    "context": 12000,
+    "output": 2000,
+    "gpu_layers": 0,
+    "thinking": false,
+    "cache_k": "f16",
+    "cache_v": "f16",
+    "flash_attention": false,
+    "kv_offload": true
+  }
+}

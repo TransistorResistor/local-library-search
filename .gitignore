@@ -1,0 +1,22 @@
+# Local state, inputs and credentials are never part of the source release.
+*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/local-search.example.json
+!/requirements-local-search.txt
+!/requirements-gguf.txt
+!/run-local-search.ps1
+!/local_search/
+!/local_search/*.py
+__pycache__/
+*.pyc
+.env
+.env.*
+*.env
+local-search.json
+*.gguf
+*.db
+*.sqlite
+*.sqlite3
+*.pdf
