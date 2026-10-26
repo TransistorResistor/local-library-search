@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import time
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,15 +46,24 @@ CREATE TABLE IF NOT EXISTS extraction_cache(byte_hash TEXT NOT NULL,policy TEXT 
 
 
 class Library:
-    def __init__(self, path):
+    def __init__(self, path, cache_mb=32):
+        started=time.perf_counter()
+        cache_mb=int(cache_mb)
+        if not 1<=cache_mb<=1024:raise ValueError('Database cache must be 1..1024 MiB per connection')
         self.path=Path(path).resolve();self.path.parent.mkdir(parents=True,exist_ok=True)
         self.db=sqlite3.connect(self.path,timeout=30)
         self.db.row_factory=sqlite3.Row
+        self.db.execute(f'PRAGMA cache_size={-cache_mb*1024}')
+        self.db.execute('PRAGMA foreign_keys=ON')
         tables={r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
         if tables:
             owned=self.db.execute("SELECT value FROM settings WHERE key='schema'").fetchone() if 'settings' in tables else None
             if not owned or owned[0]!='1':
                 self.db.close();raise ValueError('Destination is not a local_search library; choose a new database file')
+        # Current libraries need no writes or full title-index scan on query opens.
+        if tables and 'title_fts' in tables:
+            self.setup_seconds=time.perf_counter()-started
+            return
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.executescript(SCHEMA)
         version=self.db.execute("SELECT value FROM settings WHERE key='schema'").fetchone()
@@ -61,6 +71,7 @@ class Library:
         self.db.execute("INSERT OR IGNORE INTO settings VALUES('schema','1')")
         self.db.execute('INSERT INTO title_fts(rowid,title) SELECT id,title FROM sources WHERE id NOT IN (SELECT rowid FROM title_fts)')
         self.db.commit()
+        self.setup_seconds=time.perf_counter()-started
 
     def close(self):self.db.close()
     def __enter__(self):return self
@@ -159,7 +170,8 @@ class Library:
         if collection:clauses.append('s.collection=?');params.append(collection)
         return ' AND '.join(clauses),params
 
-    def search(self,query,limit=5,offset=0,date_field='added_at',after=None,before=None,collection=None,sort='relevance'):
+    def search(self,query,limit=5,offset=0,date_field='added_at',after=None,before=None,collection=None,sort='relevance',exact_count=True):
+        started=time.perf_counter()
         if not isinstance(query,str) or not query.strip() or len(query)>4000:raise ValueError('query must be a nonempty FTS5 string of at most 4000 characters')
         if collection is not None and not isinstance(collection,str):raise ValueError('collection must be a string')
         if sort not in ('relevance','newest'):raise ValueError('sort must be relevance or newest')
@@ -168,11 +180,13 @@ class Library:
         base=f'''FROM passage_fts JOIN passages p ON p.id=passage_fts.rowid
         WHERE passage_fts MATCH ? AND EXISTS(SELECT 1 FROM locations l JOIN sources s ON s.doc_id=l.doc_id
         WHERE l.passage_id=p.id AND {where})'''
-        count=self.db.execute('SELECT count(*) '+base,[query]+params).fetchone()[0]
+        count=self.db.execute('SELECT count(*) '+base,[query]+params).fetchone()[0] if exact_count else None
+        counted=time.perf_counter()
         date_expr=f'(SELECT max(s.{date_field}) FROM locations l JOIN sources s ON s.doc_id=l.doc_id WHERE l.passage_id=p.id AND {where})'
         # SELECT placeholders precede WHERE placeholders.
         order='newest DESC,rank,p.id' if sort=='newest' else 'rank,p.id'
-        rows=self.db.execute(f"SELECT p.id,p.text,bm25(passage_fts) AS rank,{date_expr} AS newest "+base+f' ORDER BY {order} LIMIT ? OFFSET ?',params+[query]+params+[limit,offset]).fetchall()
+        rows=self.db.execute(f"SELECT p.id,p.text,bm25(passage_fts) AS rank,{date_expr} AS newest "+base+f' ORDER BY {order} LIMIT ? OFFSET ?',params+[query]+params+[limit+1,offset]).fetchall()
+        has_more=len(rows)>limit;rows=rows[:limit];ranked=time.perf_counter()
         hits=[]
         for r in rows:
             locs=self.db.execute(f'''SELECT DISTINCT l.doc_id,l.page,l.start_char,l.end_char,s.id AS source_id,s.title,s.locator,
@@ -181,7 +195,8 @@ class Library:
               ORDER BY s.{date_field} DESC,s.id LIMIT 20''',[r['id']]+params).fetchall()
             total=self.db.execute(f'SELECT count(*) FROM locations l JOIN sources s ON s.doc_id=l.doc_id WHERE l.passage_id=? AND {where}',[r['id']]+params).fetchone()[0]
             hits.append(dict(passage_id=r['id'],text=r['text'],rank=r['rank'],newest=r['newest'],locations=[dict(x) for x in locs],location_count=total))
-        return dict(query=query,total_unique_passages=count,results=hits,next_offset=offset+len(hits) if offset+len(hits)<count else None,
+        return dict(query=query,total_unique_passages=count,results=hits,next_offset=offset+len(hits) if has_more else None,
+                    timings=dict(count_seconds=counted-started,rank_seconds=ranked-counted,metadata_seconds=time.perf_counter()-ranked,total_seconds=time.perf_counter()-started),
                     date_field=date_field,date_note='Date added/captured is not publication date. Missing dates are excluded by date filters.')
 
     def read(self,doc_id,start_char=0,count_chars=4000):

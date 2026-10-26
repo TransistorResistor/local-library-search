@@ -27,5 +27,8 @@
     "cache_v": "f16",
     "flash_attention": false,
     "kv_offload": true
+  },
+  "database_options": {
+    "cache_mb": 32
   }
 }

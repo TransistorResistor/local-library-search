@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from .store import sha, utc_now
+from .progress import Progress,FailureLog
 
 EXTRACT_VERSION='pdf-text-v1'
 
@@ -85,7 +86,7 @@ def extract_isolated(path,options,timeout=90):
     return json.loads(process.stdout)
 
 
-def ingest_folder(library,config,extractor=extract_isolated):
+def ingest_folder(library,config,extractor=extract_isolated,on_progress=None,on_failure=None):
     root=Path(config['path']).expanduser().resolve();collection=config['name']
     if not root.is_dir():raise ValueError(f'Folder unavailable; retained index: {root}')
     options={k:config[k] for k in ('min_words','ascii_ratio','max_pages') if k in config}
@@ -93,13 +94,19 @@ def ingest_folder(library,config,extractor=extract_isolated):
     except importlib.metadata.PackageNotFoundError:pdf_version='unavailable'
     policy=sha(json.dumps([EXTRACT_VERSION,pdf_version,options],sort_keys=True))
     seen=set();scan_errors=[];stats=dict(collection=collection,hashed=0,extracted=0,cached=0,indexed=0,skipped=0,errors=0,removed=0)
-    def onerror(error):scan_errors.append(str(error))
+    progress=Progress(collection,stats,on_progress);progress.emit('Starting',root,force=True)
+    def failure(path,reason,kind='ERROR'):
+        if on_failure:on_failure(collection,path,reason,kind)
+    def onerror(error):
+        scan_errors.append(str(error));failure(getattr(error,'filename',None) or root,error,'SCAN ERROR')
     for folder,dirs,files in os.walk(root,followlinks=False,onerror=onerror):
+        progress.emit('Discovering PDFs',folder)
         dirs[:]=[d for d in dirs if not (Path(folder)/d).is_symlink() and not (hasattr(Path(folder)/d,'is_junction') and (Path(folder)/d).is_junction())]
         for name in sorted(files):
             path=Path(folder)/name
             if path.suffix.lower()!='.pdf' or path.is_symlink():continue
             key=path.relative_to(root).as_posix();seen.add(key)
+            progress.emit('Checking file',path,force=True)
             created=None;modified=None
             try:
                 stat=path.stat()
@@ -107,28 +114,40 @@ def ingest_folder(library,config,extractor=extract_isolated):
                 created=date(getattr(stat,'st_birthtime',stat.st_ctime if os.name=='nt' else None))
                 if stat.st_size>config.get('max_file_mb',200)*1024*1024:
                     with library.db:library.put(collection,key,path.stem,str(path),[],modified_at=modified,added_at=created,added_basis='filesystem_creation' if created else None,status='skipped',detail={'reason':'file size limit exceeded'})
-                    stats['skipped']+=1;continue
+                    stats['skipped']+=1;failure(path,'file size limit exceeded','SKIPPED');continue
+                progress.emit('Hashing',path,force=True)
                 h=file_hash(path);stats['hashed']+=1
                 cached=library.db.execute('SELECT result FROM extraction_cache WHERE byte_hash=? AND policy=?',(h,policy)).fetchone()
                 if cached:result=json.loads(cached[0]);stats['cached']+=1
                 else:
+                    progress.emit('Extracting PDF (up to 90s timeout)',path,force=True)
                     result=extractor(path,options);stats['extracted']+=1
                     if file_hash(path)!=h:raise ValueError('File changed during extraction; retry next refresh')
                 if path.stat().st_mtime_ns!=stat.st_mtime_ns:raise ValueError('File changed during scan')
                 status='indexed' if result['segments'] else 'skipped'
+                progress.emit('Indexing cached text' if cached else 'Indexing extracted text',path,force=True)
                 with library.db:
                     if not cached:library.db.execute('INSERT OR REPLACE INTO extraction_cache VALUES(?,?,?)',(h,policy,json.dumps(result,ensure_ascii=False)))
                     library.put(collection,key,result.get('title') or path.stem,str(path),result['segments'],byte_hash=h,
                         added_at=created,added_basis='filesystem_creation' if created else None,modified_at=modified,status=status,
                         detail={k:v for k,v in result.items() if k not in ('segments','title')})
                 stats[status]+=1
+                if status=='skipped':failure(path,result.get('reason') or 'no accepted text','SKIPPED')
+                elif any(not p.get('accepted',True) for p in result.get('quality',[])):
+                    rejected=[p.get('page') for p in result['quality'] if not p.get('accepted',True)]
+                    failure(path,'Rejected PDF pages: '+str(rejected),'PARTIAL')
             except Exception as error:
                 stats['errors']+=1
+                failure(path,error)
                 # Do not serve stale content after a known failed update.
                 with library.db:library.put(collection,key,path.stem,str(path),[],status='error',added_at=created,added_basis='filesystem_creation' if created else None,modified_at=modified,detail={'reason':str(error)[:1000]})
+            finally:
+                progress.processed+=1;progress.emit('File processed',path)
+    progress.emit('Reconciling deletions / cleaning index',root,force=True)
     if not scan_errors:
         with library.db:stats['removed']=library.prune(collection,seen)
     else:stats['scan_errors']=scan_errors;stats['deletion_reconciliation']='skipped because traversal was incomplete'
+    progress.total=progress.processed;progress.emit('Complete',root,force=True)
     return stats
 
 
@@ -166,9 +185,10 @@ def clipper_connection(path,closed_snapshot=False,scratch=None):
             finally:db.close()
 
 
-def ingest_clipper(library,config):
+def ingest_clipper(library,config,on_progress=None,on_failure=None):
     path=Path(config['path']).expanduser().resolve();collection=config['name'];seen=set()
     stats=dict(collection=collection,indexed=0,skipped=0,removed=0)
+    progress=Progress(collection,stats,on_progress);progress.emit('Starting',path,force=True)
     with clipper_connection(path,config.get('closed_snapshot',False),library.path.parent) as source:
         source.row_factory=sqlite3.Row
         columns={r[1] for r in source.execute('PRAGMA table_info(clips)')}
@@ -176,9 +196,11 @@ def ingest_clipper(library,config):
         if not required<=columns or not {'content_text','content_html'}&columns:raise ValueError('Unsupported clipper schema; expected clips(id,title,captured_at,content_text/content_html)')
         wanted=['id','title','captured_at','url','canonical_url','content_text','content_html','date_published_norm','date_precision']
         selection=','.join('"'+c+'"' if c in columns else 'NULL AS "'+c+'"' for c in wanted)
+        progress.total=source.execute('SELECT count(*) FROM clips').fetchone()[0]
         with library.db:
             for row in source.execute('SELECT '+selection+' FROM clips ORDER BY id'):
                 key=str(row['id']);seen.add(key)
+                progress.emit('Processing clip (commit pending)',str(path)+'#clip='+key,force=True)
                 text=row['content_text'] or ''
                 if not text.strip() and row['content_html']:
                     parser=HTMLText();parser.feed(row['content_html']);text=''.join(parser.parts).strip()
@@ -189,13 +211,28 @@ def ingest_clipper(library,config):
                     published_at=date(row['date_published_norm']),date_precision=row['date_precision'],status=status,
                     detail={'source_database':str(path),'clip_id':row['id'],'reason':'no stored text; PDF attachments are not implicitly extracted' if not text else None})
                 stats[status]+=1
+                if status=='skipped' and on_failure:on_failure(collection,str(path)+'#clip='+key,'no stored text; PDF attachments are not implicitly extracted','SKIPPED')
+                progress.processed+=1;progress.emit('Clip processed (commit pending)')
+            progress.emit('Reconciling deletions / committing',path,force=True)
             stats['removed']=library.prune(collection,seen)
+    progress.emit('Complete',path,force=True)
     return stats
 
 
-def refresh(library,config):
+def refresh(library,config,on_progress=None):
     reports=[]
-    for source in config['sources']:
-        try:reports.append((ingest_folder if source['type']=='folder' else ingest_clipper)(library,source))
-        except Exception as error:reports.append({'collection':source['name'],'error':str(error),'retained_existing_index':True})
+    log=FailureLog(library.path.parent/'ingestion.log')
+    try:
+        for index,source in enumerate(config['sources'],1):
+            def progress(event):
+                if on_progress:on_progress(dict(event,source_number=index,source_count=len(config['sources'])))
+            try:
+                report=(ingest_folder if source['type']=='folder' else ingest_clipper)(library,source,on_progress=progress,on_failure=log.failure)
+                report['log_file']=str(log.path);reports.append(report)
+            except Exception as error:
+                log.failure(source['name'],source['path'],error)
+                reports.append({'collection':source['name'],'error':str(error),'retained_existing_index':True,'log_file':str(log.path)})
+                progress({'type':'ingest_progress','collection':source['name'],'phase':'Source failed','current':source['path'],
+                          'processed':0,'total':None,'stats':{'errors':1},'elapsed_seconds':0})
+    finally:log.close()
     return reports

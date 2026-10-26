@@ -1,7 +1,74 @@
 # Local Library Search
 
+Roadmap: [plan v1.1 — reasons, priorities and acceptance checks](PLAN_V1_1.md).
+
 This native desktop program indexes a webclipper SQLite database and PDF files anywhere beneath configured folders. It keeps its own SQLite FTS5 library. You can search directly without a model, or load a GGUF inside the program and ask questions in ordinary language. Sources and inference stay local; no OpenRouter call is made by the desktop program. A command-line interface is also available.
 
+
+## v1.1 desktop updates
+
+- **Source links:** search results, expanded passages, document pages and model answers include named source links. Hover over a link for the full title, registered path/URL and available source dates. PDFs open in the default external viewer; webclips open their original HTTP(S) URL. Page-specific viewer navigation is not included. Missing files produce an explanation.
+- **Live generation:** enable **Show live model output** to inspect thinking and action JSON in a separate, bounded pane. This is unvalidated model output, not the final answer. Tools execute only after the complete action is validated. Updates are batched; the pane retains at most 32,000 characters and 1,000 lines and is never fed back into context. It may contain source excerpts.
+- **Measurements:** direct search reports queue, connection, count, ranking, metadata and render time. Model answers report model loading, model rounds, generation-request first-output latency and an approximate last-round decoding rate, excluding the first emitted token. **Displayed in** includes the full GUI operation, loading and tools. Approximate generated-token counts include thinking and action JSON; these are not native runtime performance counters.
+- **Search totals:** the GUI skips the full exact count by default, retaining ordinary ranking, filters and pagination. Select **Exact total** when required. CLI searches retain exact counts; add `--no-count` to skip them. An omitted count is `null`, never an invented total.
+- **Database cache:** **Sources & model** exposes a 1–1024 MiB SQLite cache budget per connection, default 32 MiB. The GUI reuses one worker-owned connection until its database/cache configuration changes. This is a suggested page-cache maximum, not preallocated RAM or a full in-memory index. Current-library opens no longer run schema setup or a full title-index repair scan. Refresh and inference still share the existing serial worker, so ingestion can delay an interactive operation.
+- **64k context:** the preset sets total context to **65,536 tokens** and output reserve to **8,192**, leaving at most **57,344 prompt tokens** after chat-template formatting. Thinking, action JSON and answer generation share the output reserve. Model/runtime support and sufficient KV-cache memory are required. Defaults and existing configurations remain 12,000/2,000; choose the preset explicitly. The larger cap retains more recent evidence before eviction; the 1,500-token notebook and bounded tool-result sizes stay conservative.
+
+Optional configuration at the top level:
+
+```json
+"database_options": {"cache_mb": 32}
+```
+
+These changes do not introduce inferred metadata filtering, a reranker, synonym rewriting or a full RAM snapshot. Folder-selected LLM enrichment remains a separate planned feature. Existing added/modified/publication dates are displayed as stored; added dates do not establish information recency.
+
+### End-to-end question timing
+
+For model questions, the summary shows **Click → final answer complete**. The clock starts at entry to the Ask button handler, before settings/configuration work, and ends after the final answer and named sources have been inserted and Tk has processed idle redraws. Cancelled or incomplete runs are labelled **Click → stopped**, never completed answers.
+
+Enable **Show question timing breakdown** for non-overlapping totals: settings/UI setup, worker queue, model load/reuse, database connection, model prompt formatting, model inference, model response processing, FTS searches, catalogue lookups, context expansion, document reads, notebook operations, other tools, context budgeting/validation/source resolution, worker bookkeeping/initial trace save, UI delivery/polling, and final-answer rendering. Repeated operations are accumulated across all rounds; failed tool calls are included. These stages sum to the end-to-end total, subject to floating-point/rounding precision.
+
+Model inference includes native prompt evaluation and generation; the app does not claim to measure those separately. First-generation-request-to-first-output latency is an additional diagnostic already included in the stages, not another duration to add. Background live-output redraws overlap worker execution and are not added a second time. The existing approximate decoding-rate diagnostic remains available.
+
+The local `last-gui-search.json` trace includes `gui_timing` with the complete breakdown, plus per-round model and per-tool timings. Final trace persistence runs asynchronously after visible answer completion and is excluded from that total. The initial trace save is included in worker bookkeeping. Timing-label rendering and opening a source viewer are outside answer completion. Direct FTS searches retain their detailed query-phase measurements and **Displayed in** summary.
+
+### Live ingestion feedback and failure logs
+
+Refreshing the index shows the active source, current filename, phase, elapsed time and processed/indexed/cached/extracted/skipped/error counts. Phases include database opening, folder discovery, hashing, PDF extraction, indexing and deletion reconciliation. The status remains visible while extraction is running; a long PDF may take up to the existing 90-second worker timeout. A single progress bar is shown on Search, and manual refresh switches to that tab.
+
+Folder traversal remains one pass: the final PDF count is unknown until traversal finishes, so its bar is indeterminate and the processed count increases as files are found. No speculative percentage or ETA is shown. Webclipper imports have an exact row total and a determinate bar; intermediate clip counts are provisional until the existing transaction commits. Counts are per source, with source number/total shown. Cached/extracted are processing-path counts and overlap indexed/skipped outcomes; do not add them together as separate files.
+
+Failures are printed immediately to **stderr** when a terminal exists. The CLI also prints throttled progress to stderr, keeping its final stdout report as JSON. Console-free `pythonw` launches retain failures in **`ingestion.log` beside the library database**, with two rotated backups (`.1`, `.2`), each capped at approximately 5 MiB. The log includes paths and reasons for source/file errors, scan failures, skipped files and partially accepted PDFs. These are local operational records and can contain private filenames. The GUI completion summary shows counts and the log path.
+
+To see terminal output while using the GUI:
+
+```powershell
+.\.venv\Scripts\python.exe -m local_search gui
+```
+
+Progress updates are coalesced so a fast ingest does not fill the UI event queue. This does not change extraction quality gates, hashing, transactions or deletion safety, and it does not add ingest cancellation or parallel ingestion/search.
+
+## Editing prompts
+
+The editable UTF-8 `prompts.txt` beside this README contains named sections:
+
+```text
+[search.system]
+The system instructions for library questions...
+
+[metadata.system]
+Draft instructions for future metadata extraction...
+```
+
+`search.system` supplies the system prompt for **Ask local model** and the CLI `ask` command. Its initial text matches the previous built-in prompt. Preserve the documented JSON action names and fields when editing it. Host-side tool validation, citation checks and context limits remain enforced.
+
+`metadata.system` is a draft for the planned extraction workflow; it is not currently used. Add other uniquely named sections as needed. A future task can select them through `load_prompt(name, path)`; adding a section alone does not activate a feature.
+
+The app uses the bundled file by default. Select another file under **Sources & model → Prompt library**, or add `"prompts_file": "my-prompts.txt"` at the top level of your JSON configuration. Custom relative paths resolve against the configuration directory; blank/unset uses the bundled file, independently of the working directory. CLI and GUI use the same selection. **Load & test GGUF** retains its fixed READY probe.
+
+Edits apply to the next question without restarting or reloading the model. Each question reads its prompt once; its local result/trace records the selected section and a SHA256 of its text. Prompt text, chat formatting and evidence all count toward the total token cap. Missing files, duplicate/empty sections, or a missing `search.system` fail explicitly rather than silently falling back.
+
+Use a section header on its own line. Text is literal: there is no variable substitution, include processing or code execution. Preamble lines beginning with `#` are ignored before the first section; within a section every line, including `#` lines, is prompt content. Prompt files are limited to 1 MiB. Keep custom private prompts outside the source-release directory; the supplied generic `prompts.txt` is intended to be published with the app.
 
 ## 1. Install
 

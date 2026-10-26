@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import ctypes
+import time
 from pathlib import Path
 
 
@@ -66,15 +67,41 @@ class GGUF:
 
     def count(self,messages):return len(self.tokens(messages)[0])
 
-    def complete(self,messages):
+    def complete(self,messages,on_event=None):
+        started=time.perf_counter()
         tokens,rendered=self.tokens(messages)
         if len(tokens)+self.output>self.context:raise ValueError('Prompt plus output reserve exceeds the configured context cap')
         criteria=rendered.stopping_criteria
         if getattr(self,'cancel_event',None) is not None:
             from llama_cpp import StoppingCriteriaList
             criteria=StoppingCriteriaList(list(criteria or [])+[lambda tokens,logits:self.cancel_event.is_set()])
-        response=self.llm.create_completion(prompt=tokens,max_tokens=self.output,temperature=0,
-            stop=rendered.stop,stopping_criteria=criteria)
+        options=dict(prompt=tokens,max_tokens=self.output,temperature=0,stop=rendered.stop,stopping_criteria=criteria)
+        runtime_started=time.perf_counter()
+        if on_event is None:
+            response=self.llm.create_completion(**options)
+            ended=time.perf_counter()
+        else:
+            on_event({'type':'phase','text':'Processing prompt / generating'})
+            chunks=[];finish=None;first=None
+            for chunk in self.llm.create_completion(**options,stream=True):
+                choice=chunk['choices'][0];text=choice.get('text','')
+                if text:
+                    if first is None:first=time.perf_counter()
+                    chunks.append(text);on_event({'type':'text','text':text})
+                if choice.get('finish_reason') is not None:finish=choice['finish_reason']
+            text=''.join(chunks);ended=time.perf_counter()
+            # Public tokenizer only: approximate because token boundaries can differ on re-tokenization.
+            generated=len(self.llm.tokenize(text.encode('utf-8'),add_bos=False))
+            response={'choices':[{'text':text,'finish_reason':finish}],
+                      'usage':{'prompt_tokens':len(tokens),'completion_tokens':generated,'total_tokens':len(tokens)+generated},
+                      'timings':{'first_output_seconds':first-started if first is not None else None,
+                                 'approx_decode_tokens_per_second':max(0,generated-1)/(ended-first) if first is not None and ended>first and generated>1 else None,
+                                 'token_count_approximate':True}}
+        timing=response.setdefault('timings',{})
+        timing['preparation_seconds']=runtime_started-started
+        timing['inference_seconds']=ended-runtime_started
+        timing['total_seconds']=time.perf_counter()-started
+        timing['postprocessing_seconds']=max(0,timing['total_seconds']-timing['preparation_seconds']-timing['inference_seconds'])
         response['reserved_total']=len(tokens)+self.output
         return response
 

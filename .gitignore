@@ -2,6 +2,8 @@
 *
 !/.gitignore
 !/README.md
+!/PLAN_V1_1.md
+!/prompts.txt
 !/LICENSE
 !/local-search.example.json
 !/requirements-local-search.txt
