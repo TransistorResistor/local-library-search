@@ -8,6 +8,7 @@
 !/local-search.example.json
 !/requirements-local-search.txt
 !/requirements-gguf.txt
+!/requirements-reranker.txt
 !/run-local-search.ps1
 !/local_search/
 !/local_search/*.py

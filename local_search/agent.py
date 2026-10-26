@@ -10,14 +10,26 @@ import hashlib
 def packed(value):return json.dumps(value,ensure_ascii=False,separators=(',',':'))
 
 
-def ask(library,model,question,max_rounds=24,note_tokens=1500,on_event=None,prompts_file=None):
+def ask(library,model,question,max_rounds=24,note_tokens=1500,on_event=None,prompts_file=None,reranker=None):
     started=time.perf_counter()
     stages={'model_seconds':0.0,'fts_search_seconds':0.0,'catalog_seconds':0.0,'context_seconds':0.0,'document_seconds':0.0,'notes_seconds':0.0,'other_tools_seconds':0.0}
     system_prompt=load_prompt('search.system',prompts_file)
+    searcher=None
+    if reranker is not None and reranker.config.enabled:
+        from .rerank import QuestionSearch,GUIDANCE
+        searcher=QuestionSearch(library,reranker,question,getattr(model,'cancel_event',None),on_event)
+        system_prompt+='\n\n'+GUIDANCE
     owned=not library.db.in_transaction
     if owned:library.db.execute('BEGIN')
     try:
-        result=_ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages)
+        result=_ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages,searcher)
+        if searcher is not None:
+            result['reranking']=searcher.trace
+            from dataclasses import asdict
+            result['reranker_settings']=asdict(reranker.config)
+            # Split search-tool wall time into lexical SQL and reranking/shortlist work.
+            stages['rerank_seconds']=min(stages['fts_search_seconds'],searcher.rerank_seconds)
+            stages['fts_search_seconds']-=stages['rerank_seconds']
         result['prompt']={'section':'search.system','sha256':hashlib.sha256(system_prompt.encode('utf-8')).hexdigest()}
         ids=result.get('citations',[])
         result['sources']=[]
@@ -32,7 +44,7 @@ def ask(library,model,question,max_rounds=24,note_tokens=1500,on_event=None,prom
     return result
 
 
-def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages):
+def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages,searcher):
     recent=[];notes={};seen={};exposed=set();serial=0;trace=[];checks=[];evictions=0
     def messages():
         return [{'role':'system','content':system_prompt},{'role':'user','content':question},
@@ -76,7 +88,7 @@ def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,st
                 return dict(status='answered',answer=action['answer'],citations=citations,trace=trace,context_checks=checks,evicted_results=evictions,saved_notes=list(notes))
             if on_event:on_event({'type':'phase','text':'Tool: '+str(name)})
             tool_started=time.perf_counter()
-            if name=='search':result=library.search(**action)
+            if name=='search':result=searcher.search(**action) if searcher is not None else library.search(**action)
             elif name=='catalog':
                 entries=library.catalog(**action);offset=int(action.get('offset',0))
                 result={'results':entries,'offset':offset,'next_offset':offset+len(entries) if entries else None}

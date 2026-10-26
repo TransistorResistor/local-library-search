@@ -34,6 +34,7 @@ class App:
     def __init__(self,root,config_path):
         self.root=root;self.path=Path(config_path).resolve();self.busy=False;self.closing=False
         self.jobs=queue.Queue();self.results=queue.Queue();self.cancel=threading.Event();self.model=None;self.model_key=None
+        self.reranker=None;self.reranker_key=None
         self.events=queue.Queue(maxsize=256);self.library=None;self.library_key=None;self.tooltip=None
         self.trace_lock=threading.Lock();self.question_serial=0
         self.ingest_lock=threading.Lock();self.ingest_latest=None;self.ingesting=False
@@ -104,12 +105,26 @@ class App:
         for label,key,default in [('Flash Attention','flash_attention',False),('KV offload','kv_offload',True),('Thinking','thinking',False)]:
             self.vars[key]=tk.BooleanVar(value=cfg.get(key,default));ttk.Checkbutton(cache,text=label,variable=self.vars[key]).pack(side='left',padx=5)
         ttk.Label(model,text='F16 uses more cache memory; Q8/Q4 use less. Quantized V requires Flash Attention. Leave GPU headroom for your display; use fewer GPU layers or a smaller context.',wraplength=960).grid(row=6,column=0,columnspan=3,sticky='w',pady=5)
+        rank=ttk.LabelFrame(self.setup,text='Optional reranker — model searches only',padding=8);rank.pack(fill='x',pady=8);rank.columnconfigure(1,weight=1)
+        cfg=self.raw.get('reranker',{})
+        self.vars['rerank_enabled']=tk.BooleanVar(value=cfg.get('enabled',False))
+        ttk.Checkbutton(rank,text='Enable reranking',variable=self.vars['rerank_enabled']).grid(row=0,column=0,sticky='w')
+        self.vars['rerank_device']=tk.StringVar(value=cfg.get('device','cpu'))
+        ttk.Combobox(rank,textvariable=self.vars['rerank_device'],values=('cpu','cuda:0','cuda:1'),state='readonly',width=12).grid(row=0,column=1,sticky='w')
+        self.entry(rank,1,'Local CrossEncoder model folder','rerank_model_dir',cfg.get('model_dir',''),'dir')
+        for row,label,key,default in [(2,'Candidates to rerank (1–1000)','candidates',40),(3,'Maximum returned per search (1–20)','top_k',5),
+                                      (4,'Batch size (1–64)','batch_size',8),(5,'CPU threads (1–32)','threads',2),
+                                      (6,'Pair token budget','max_pair_tokens',512),(7,'Scoring timeout seconds','timeout_seconds',5),
+                                      (8,'Startup timeout seconds','startup_seconds',60)]:
+            self.entry(rank,row,label,'rerank_'+key,cfg.get(key,default))
+        ttk.Label(rank,text='Ranks FTS passages against your question. CPU is default; CUDA requires GPU-enabled PyTorch and shares VRAM with the GGUF and display. Larger pools cost more time. Direct FTS searches are unchanged.',wraplength=960).grid(row=9,column=0,columnspan=3,sticky='w',pady=5)
         actions=ttk.Frame(self.setup);actions.pack(fill='x',pady=4)
         self.button(actions,'Save settings',self.save,side='left')
         self.button(actions,'Refresh index',self.ingest,side='left',padx=5)
         self.button(actions,'Index status',self.index_status,side='left')
         self.button(actions,'Load & test GGUF',self.model_check,side='left',padx=5)
         self.button(actions,'Unload model',lambda:self.submit(self.unload),side='left')
+        self.button(actions,'Unload / reset reranker',lambda:self.submit(self.unload_reranker),side='left',padx=5)
 
     def draw_sources(self):
         self.source_tree.delete(*self.source_tree.get_children())
@@ -146,6 +161,12 @@ class App:
             if interval!=0 and interval<10:raise ValueError('Auto-refresh must be 0 or at least 10 seconds.')
             data={**self.raw,'database':self.vars['database'].get(),'refresh_seconds':interval,'sources':self.sources,'model':{**self.raw.get('model',{}),**model}}
             data['database_options']={'cache_mb':cache_mb}
+            from .rerank import RerankConfig
+            from dataclasses import asdict
+            rank={'enabled':self.vars['rerank_enabled'].get(),'device':self.vars['rerank_device'].get(),'model_dir':self.vars['rerank_model_dir'].get().strip()}
+            for key in ('candidates','top_k','batch_size','threads','max_pair_tokens'):rank[key]=int(self.vars['rerank_'+key].get())
+            for key in ('timeout_seconds','startup_seconds'):rank[key]=float(self.vars['rerank_'+key].get())
+            data['reranker']=asdict(RerankConfig(**rank))
             if self.vars['prompts_file'].get().strip():data['prompts_file']=self.vars['prompts_file'].get().strip()
             else:data.pop('prompts_file',None)
             if not self.vars['torch_lib'].get():data['model'].pop('torch_lib',None)
@@ -431,7 +452,21 @@ class App:
 
     def unload(self):
         if self.model:self.model.close();self.model=None;self.model_key=None
+        self.unload_reranker()
         return {'model':'unloaded'}
+
+    def unload_reranker(self):
+        if self.reranker:self.reranker.close()
+        self.reranker=None;self.reranker_key=None
+        return {'reranker':'unloaded; next request can retry'}
+
+    def loaded_reranker(self,config):
+        from .rerank import RerankConfig,Reranker
+        options=RerankConfig(**config.get('reranker',{}));key=json.dumps(config.get('reranker',{}),sort_keys=True)
+        if not options.enabled:self.unload_reranker();return None
+        if key!=self.reranker_key:
+            self.unload_reranker();self.reranker=Reranker(options);self.reranker_key=key
+        return self.reranker
 
     def model_check(self):
         if not self.save():return
@@ -459,7 +494,7 @@ class App:
             clock['load_seconds']=time.perf_counter()-started
             started=time.perf_counter();library=self.get_library(config)
             clock['library_seconds']=time.perf_counter()-started
-            result=ask(library,model,question,on_event=self.emit,prompts_file=config.get('prompts_file'))
+            result=ask(library,model,question,on_event=self.emit,prompts_file=config.get('prompts_file'),reranker=self.loaded_reranker(config))
             result['timings']['load_seconds']=clock['load_seconds']
             trace=Path(config['database']).parent/'last-gui-search.json'
             with self.trace_lock:trace.write_text(json.dumps(result,ensure_ascii=False,indent=2),'utf-8')
@@ -477,6 +512,9 @@ class App:
             rates=[c['timings']['approx_decode_tokens_per_second'] for c in checks if c.get('timings',{}).get('approx_decode_tokens_per_second') is not None]
             label='Click → final answer complete' if result['status']=='answered' else 'Click → stopped ('+result['status']+')'
             self.metrics.set(f"{label}: {timing['click_to_complete_seconds']:.2f}s | FTS searches {result['timings']['fts_search_seconds']:.2f}s | {timing['model_rounds']} model rounds"+(f' | Last round ~{rates[-1]:.1f} tok/s' if rates else '')+' | See timing breakdown')
+            if 'reranking' in result:
+                applied=sum(t['rerank']['applied'] for t in result['reranking']);fallbacks=[t['rerank']['reason'] for t in result['reranking'] if t['rerank']['reason']]
+                self.metrics.set(self.metrics.get()+f" | Rerank {result['timings'].get('rerank_seconds',0):.2f}s ({applied} applied)"+(' | Fallback: '+', '.join(dict.fromkeys(fallbacks)) if fallbacks else ''))
             # Save final GUI measurements after the answer is displayed. This background
             # persistence is deliberately outside click-to-answer completion time.
             trace=Path(config['database']).parent/'last-gui-search.json'

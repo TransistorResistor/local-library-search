@@ -30,5 +30,17 @@
   },
   "database_options": {
     "cache_mb": 32
+  },
+  "reranker": {
+    "enabled": false,
+    "model_dir": "",
+    "device": "cpu",
+    "candidates": 40,
+    "top_k": 5,
+    "batch_size": 8,
+    "threads": 2,
+    "max_pair_tokens": 512,
+    "timeout_seconds": 5,
+    "startup_seconds": 60
   }
 }

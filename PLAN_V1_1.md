@@ -15,7 +15,9 @@ The search system prompt now lives in a named section of editable `prompts.txt`,
 
 The live pane labels both thinking and action JSON as unvalidated. It is separate from the final answer. The 64k preset is opt-in and does not change notebook or tool-result budgets. Exact model-token enforcement includes chat-template formatting and the entire output reserve.
 
-Still planned: measured full-corpus query optimisation, concurrent refresh scheduling, separate thinking/action presentation, page-specific external navigation, full RAM snapshots, and folder-selected metadata enrichment. Organisation/tag alias alignment, reference/endnote-aware evidence extraction and date-aware reranking remain future optional work. Unknown values, provenance and partial coverage must remain visible when these are introduced.
+Implemented next: optional CPU/CUDA CrossEncoder reranking of model-search candidate pools, default off, with local weights, scalable candidates, bounded batches, explicit exhaustive/newest bypass, frozen paging and lexical fallback.
+
+Still planned: measured full-corpus query optimisation, concurrent refresh scheduling, separate thinking/action presentation, page-specific external navigation, full RAM snapshots, and folder-selected metadata enrichment. Organisation/tag alias alignment, reference/endnote-aware evidence extraction and date-aware ranking remain future optional work. Unknown values, provenance and partial coverage must remain visible when these are introduced.
 
 ## Purpose and reasons for this release
 
@@ -213,7 +215,7 @@ Expose origin and review status beside enriched fields. Let the user select the 
 
 | Item | Status and recommendation |
 |---|---|
-| Optional local CPU reranker | Implemented in the earlier evaluation harness, not integrated into the desktop app. Retain an opt-in desktop mode, a local model-folder picker and bounded candidate scoring as follow-on work. Weights, tokenizer and configuration are supplied separately; weights are not published with the source. Profile FTS5 first. |
+| Optional local CPU/CUDA reranker | Now implemented in the desktop app, default off. Local model-folder picker, 1–1000 candidates, bounded scoring, per-question frozen paging, timeout/cancellation and lexical fallback. Manual FTS remains unchanged. Weights/tokenizer/configuration are supplied separately and excluded from publication. Broad answer-quality and actual GPU/coexistence comparisons remain pending. |
 | User-supplied alias dictionary | CSV ingestion and scoped suggestions exist in the evaluation harness. Desktop import/preview/lookup remains outstanding. Do not merge ambiguous groups or silently rewrite required/excluded terms. |
 | Structured query assistance | A safer way to build quoted phrases, alternatives and exclusions remains pending. Raw FTS5 should stay available. |
 | Local 27B / weight- and KV-quantisation checks | Still needed to establish actual local speed, memory and quality. An 8B loading check does not establish 27B answer performance. |

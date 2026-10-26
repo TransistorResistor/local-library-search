@@ -1,0 +1,2 @@
+# Optional desktop CPU/CUDA reranker. Install your chosen PyTorch build first.
+sentence-transformers>=5.5,<6

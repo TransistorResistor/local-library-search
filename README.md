@@ -20,7 +20,7 @@ Optional configuration at the top level:
 "database_options": {"cache_mb": 32}
 ```
 
-These changes do not introduce inferred metadata filtering, a reranker, synonym rewriting or a full RAM snapshot. Folder-selected LLM enrichment remains a separate planned feature. Existing added/modified/publication dates are displayed as stored; added dates do not establish information recency.
+Inferred metadata filtering, synonym rewriting and full RAM snapshots remain planned. Optional reranking is described below. Folder-selected LLM enrichment remains a separate planned feature. Existing added/modified/publication dates are displayed as stored; added dates do not establish information recency.
 
 ### End-to-end question timing
 
@@ -246,3 +246,64 @@ When one GPU drives both the desktop and inference, leave headroom by reducing G
 ## License
 
 MIT. See [LICENSE](LICENSE). Optional dependencies retain their respective licenses; model weights must be obtained and used under their own licenses.
+
+## Optional CPU or GPU reranking
+
+Reranking is **off by default** and applies only to **Ask local model** and CLI `ask`. Manual **Search FTS5**, catalogue browsing, document reading and ingestion retain their existing behaviour.
+
+FTS5 first retrieves a bounded pool of passages satisfying the original Boolean/proximity query and source/date filters. A separate CrossEncoder then scores each **(original natural-language question, passage text)** pair. The search model may provide `relevance_query` to focus that comparison. The scores estimate relevance; they are not confidence probabilities, factual verification or freshness scores. The reranker cannot discover documents outside the FTS candidate pool.
+
+### Install the optional runtime
+
+Use the same Python environment as the application. Install the CPU or CUDA PyTorch build appropriate to your machine using the [official PyTorch installation selector](https://pytorch.org/get-started/locally/), then:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-reranker.txt
+```
+
+CPU-only PyTorch can run CPU reranking but cannot run it on CUDA simply by changing the dropdown. PyTorch's CUDA support is separate from the llama.cpp CUDA build used by the GGUF. Reranking runs in an isolated process so its framework/DLL state is separate from GGUF inference. No reranker dependency is imported or model loaded when the feature is disabled.
+
+### Use local weights
+
+Obtain a compatible **trained scalar CrossEncoder reranker** and keep its entire exported model folder locally, for example `C:/Models/Reranker`. This is **not a GGUF**, and a lone weights file is insufficient. The folder needs its architecture/configuration, tokenizer files, weights (`.safetensors` or the model's supported format) and any module/submodule files supplied by the model author. For a modular Sentence Transformers export, preserve `modules.json` and folders such as pooling/dense/normalisation modules; copying only the root encoder can omit the trained scoring head.
+
+The local CPU integration was checked with `cross-encoder/ettin-reranker-17m-v1` (revision `9e4aa35321a6dd1a43ca313f500c4b4f7cfb5cc6`). The app does not bundle, download or automatically update those weights. Use the complete corresponding local export and retain its licence/provenance separately. A generative chat model or embedding-only model is not interchangeable with a trained reranker.
+
+In **Sources & model → Optional reranker**:
+
+1. Browse to the local model folder.
+2. Select **cpu** or explicitly **cuda:0** (the first visible CUDA GPU); **cuda:1** is also available for a second GPU. CPU is the default. Advanced configurations can use another `cuda:N` device.
+3. Set **Candidates to rerank**, from 1 to 1,000 (default 40). This controls how many eligible lexical passages are scored, not the size of the whole library.
+4. Set the maximum results returned per model search, from 1 to 20 (default 5). The model can request fewer. Further pages cover the same frozen candidate pool.
+5. Enable reranking, save settings and ask a question.
+
+A corresponding top-level configuration section is:
+
+```json
+"reranker": {
+  "enabled": false,
+  "model_dir": "C:/Models/Reranker",
+  "device": "cpu",
+  "candidates": 40,
+  "top_k": 5,
+  "batch_size": 8,
+  "threads": 2,
+  "max_pair_tokens": 512,
+  "timeout_seconds": 5,
+  "startup_seconds": 60
+}
+```
+
+Relative model-folder paths resolve against the configuration directory. GUI setting changes apply on the next question. The process/model is reused across questions with unchanged settings. **Unload / reset reranker** releases it and permits retrying a previously failed load. **Unload model** releases both models. CLI `ask` uses the same settings and releases its reranker on exit.
+
+### Limits, GPU use and diagnostics
+
+Larger candidate pools cost more work; increasing batch size can improve throughput at the cost of more memory. Increase the scoring timeout if larger pools exceed it. The pair-token limit counts the complete query/passage pair using the reranker's tokenizer. If a pair exceeds that budget, the entire pool retains lexical order rather than silently truncating evidence. Raise the pair budget only within the selected model's supported capacity.
+
+CUDA use is opt-in. Its model, framework context and batches consume VRAM alongside the GGUF, K/V cache and display. There is no automatic memory reservation or GPU quantisation. Reduce batch size, choose CPU, or unload the reranker if necessary. GPU execution requires a compatible GPU/PyTorch installation; it has not been performance-tested on this development machine's CPU-only PyTorch build.
+
+Model loading is local-files-only with remote code disabled. Missing models/dependencies, unavailable CUDA, out-of-memory errors, invalid scores and deadline failures produce an explicit lexical-order fallback **within the candidate pool**. A timed-out worker is terminated, and fatal failures are not repeatedly retried until reset/settings change. Stop inference also cancels reranking at a short polling boundary.
+
+For complete lexical enumeration, the model can set `search_scope:"exhaustive"`; `sort:"newest"` also bypasses reranking. Shortlist responses identify `match_scope:"candidate_pool"`, its size and whether more lexical results exist outside it. Paging is frozen within a question's database snapshot. Expired pools require restarting at offset zero; they are not silently rescored halfway through pagination.
+
+The timing breakdown separates **FTS searches** from **Reranking / shortlist work**. The local question trace records candidate IDs, ranked IDs, relevance question, device, scores, pair-token counts, fallback reasons and cold/warm load/scoring time. Compare identical questions and sources with the toggle off/on before treating it as an improvement. Neither an answered question nor a higher score proves better answer quality.

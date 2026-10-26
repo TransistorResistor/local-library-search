@@ -9,7 +9,7 @@ def complete_timing(result,clicked,submitted,worker_started,worker_finished,rend
             'Model load / reuse':load_seconds,'Database connection':library_seconds,
             'Model prompt formatting':prep,'Model inference':inference,
             'Model response processing':max(0,agent['model_seconds']-prep-inference)}
-    for label,key in [('FTS searches','fts_search_seconds'),('Catalogue lookups','catalog_seconds'),
+    for label,key in [('FTS searches','fts_search_seconds'),('Reranking / shortlist work','rerank_seconds'),('Catalogue lookups','catalog_seconds'),
                       ('Context expansion','context_seconds'),('Document reads','document_seconds'),
                       ('Notebook operations','notes_seconds'),('Other tools','other_tools_seconds'),
                       ('Context budgeting / validation / source resolution','agent_processing_seconds')]:

@@ -24,6 +24,8 @@ def configuration(path):
     for source in data['sources']:
         if Path(source['path'])==Path(data['database']):raise ValueError('Library database must not overwrite a source database')
     model=data.setdefault('model',{})
+    if data.get('reranker',{}).get('model_dir'):
+        data['reranker']['model_dir']=str((path.parent/Path(data['reranker']['model_dir']).expanduser()).resolve())
     for key in ('path','torch_lib'):
         if model.get(key):model[key]=str((path.parent/Path(model[key]).expanduser()).resolve())
     return data
@@ -76,8 +78,13 @@ def main():
                     result['dll_directories']=model.dlls.paths
                 else:
                     from .agent import ask as ask_library
+                    from .rerank import RerankConfig,Reranker
                     if not 1<=args.max_rounds<=100:raise ValueError('max-rounds must be 1..100')
-                    result=ask_library(library,model,args.question,max_rounds=args.max_rounds,prompts_file=config.get('prompts_file'))
+                    rerank_config=RerankConfig(**config.get('reranker',{}))
+                    reranker=Reranker(rerank_config) if rerank_config.enabled else None
+                    try:result=ask_library(library,model,args.question,max_rounds=args.max_rounds,prompts_file=config.get('prompts_file'),reranker=reranker)
+                    finally:
+                        if reranker:reranker.close()
                     if args.trace:
                         args.trace.parent.mkdir(parents=True,exist_ok=True);args.trace.write_text(json.dumps(result,ensure_ascii=False,indent=2),'utf-8')
                     result={k:v for k,v in result.items() if k not in ('trace','context_checks')}
