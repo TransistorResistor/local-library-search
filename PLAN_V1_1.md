@@ -17,7 +17,7 @@ The live pane labels both thinking and action JSON as unvalidated. It is separat
 
 Implemented next: optional CPU/CUDA CrossEncoder reranking of model-search candidate pools, default off, with local weights, scalable candidates, bounded batches, explicit exhaustive/newest bypass, frozen paging and lexical fallback.
 
-Still planned: measured full-corpus query optimisation, concurrent refresh scheduling, separate thinking/action presentation, page-specific external navigation, full RAM snapshots, and folder-selected metadata enrichment. Organisation/tag alias alignment, reference/endnote-aware evidence extraction and date-aware ranking remain future optional work. Unknown values, provenance and partial coverage must remain visible when these are introduced.
+Still planned: separate thinking/action presentation, page-specific external navigation and folder-selected metadata enrichment. Measured full-corpus optimisation and concurrent refresh scheduling are parked following user confirmation that current search performance is satisfactory. See v1.2 for the implemented refresh, network-source, safe-search and completion features. Organisation/tag alias alignment, reference/endnote-aware evidence extraction and date-aware ranking remain future optional work. Unknown values, provenance and partial coverage must remain visible when these are introduced.
 
 ## Purpose and reasons for this release
 
@@ -48,7 +48,6 @@ No automatic source-file changes, OCR requirement, model download or cloud enric
 | 3 | Streaming and LLM timings | Long silent waits obscure progress and performance. | Throttled output/progress events, elapsed time, first-output latency and generation rate. |
 | 4 | Configurable database caching | A large working set may benefit from more RAM. | Persistent connections and bounded cache/mapping experiments after query changes. |
 | 5 | Folder-selected metadata enrichment | Better metadata is useful but must not delay ingestion. | Resumable opt-in queue, limited fields, evidence-backed extraction and idle scheduling. |
-| 6 | Optional full RAM snapshot | Only justified if disk access remains a material bottleneck. | Conditional experiment, not a required v1.1 feature or default. |
 
 Streaming and timing should share the same event mechanism. Initial timing instrumentation can be added before streaming so the latter has a measured baseline.
 
@@ -131,7 +130,7 @@ Use a monotonic clock. Count thinking and action tokens as generated work. Do no
 
 Check thinking on/off, split tags, cancellation, output exhaustion, malformed actions and multiple tool rounds. Streamed and non-streamed assembly should produce equivalent final parser input. UI updates must not materially reduce generation throughput or increase the context allocation.
 
-## 4. RAM and database-cache options
+## 4. Database-cache options
 
 ### Reason and practical recommendation
 
@@ -141,17 +140,11 @@ Start with a disk-backed authoritative database, persistent search connections a
 
 Show configured versus observed memory settings where available. Account for cache budgets per connection/database and for total system RAM used by the model, CPU-offloaded weights, extraction, Windows and other applications. K/V cache and database cache are different controls. Avoid increasing memory until the system begins paging.
 
-### Conditional full RAM mode
+### Scope update and acceptance
 
-- Use SQLite's backup/snapshot facilities to construct a consistent in-memory search copy. Do not copy only a live database file while ignoring its WAL.
-- Keep disk authoritative. A RAM snapshot is read-only, replaceable and explicitly versioned; ingestion/enrichment writes continue to disk.
-- Expose loading time, estimated/observed memory use and snapshot age. Refresh or swap snapshots between questions, preserving a consistent source/version mapping for each active question.
-- Copying the whole current database also copies document text and extraction-cache tables, not only the inverted index. A smaller search-only snapshot requires deliberate schema/dependency design; it is not a free configuration change.
-- Provide a reload/discard control and a disk-search fallback. Do not create a second full copy per question or promise transparent live synchronization.
+Full RAM search snapshots were dropped following the 27 October 2026 v1.2 review; they are no longer a deferred deliverable. Keep the disk-backed authoritative index and bounded page cache.
 
-### Acceptance and decision gate
-
-Compare disk/cache/mapped/RAM variants on identical queries, both cold and warm, with startup/reload costs and memory recorded. Adopt RAM snapshots only if the benefit justifies extra memory and synchronization complexity. Otherwise retain them as deferred work.
+Compare disk/cache/mapped variants on identical queries, both cold and warm, with startup costs and memory recorded. Adopt tuning only where measured benefit justifies the memory use. See plan v1.2 for the codebase review dependencies and candidate-fetch optimisation opportunity.
 
 ## 5. Optional metadata enrichment for selected folders
 
@@ -236,4 +229,3 @@ Update the setup guide for new controls and migrations. Keep source-only publica
 - [SQLite FTS5 ranking and sorting](https://www.sqlite.org/fts5.html#sorting_by_auxiliary_function_results): the hidden rank column can improve limited-result sorting; validate the actual query plan.
 - [SQLite page-cache settings](https://www.sqlite.org/pragma.html#pragma_cache_size): connection/database cache sizing and its scope.
 - [SQLite memory-mapped I/O](https://www.sqlite.org/mmap.html): potential benefits, limitations and platform considerations.
-- [SQLite online backup API](https://www.sqlite.org/backup.html): consistent database snapshots, including in-memory use cases.

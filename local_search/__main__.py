@@ -14,6 +14,8 @@ def configuration(path):
     for source in data['sources']:
         if source.get('type') not in ('folder','clipper'):raise ValueError('Source type must be folder or clipper')
         if not source.get('name') or not source.get('path'):raise ValueError('Every source requires name and path')
+        if type(source.get('closed_snapshot',False)) is not bool:raise ValueError('closed_snapshot must be true or false')
+        if source.get('network_mode') not in (None,'closed_snapshot','export'):raise ValueError('network_mode must be closed_snapshot or export')
         names.append(source['name'])
         source['path']=str((path.parent/Path(source['path']).expanduser()).resolve())
         if source.get('ascii_ratio',.8)<0 or source.get('ascii_ratio',.8)>1:raise ValueError('ascii_ratio must be 0..1')
@@ -24,6 +26,10 @@ def configuration(path):
     for source in data['sources']:
         if Path(source['path'])==Path(data['database']):raise ValueError('Library database must not overwrite a source database')
     model=data.setdefault('model',{})
+    note_tokens=data.get('agent_options',{}).get('note_tokens',6000)
+    if type(note_tokens) is not int or not 64<=note_tokens<=32768:raise ValueError('Notebook budget must be 64..32768 tokens')
+    if data.get('agent_options',{}).get('effort','legacy') not in ('legacy','quick','balanced','thorough'):raise ValueError('Invalid answer effort mode')
+    if data.get('search_input_mode','simple') not in ('simple','advanced'):raise ValueError('Invalid search input mode')
     if data.get('reranker',{}).get('model_dir'):
         data['reranker']['model_dir']=str((path.parent/Path(data['reranker']['model_dir']).expanduser()).resolve())
     for key in ('path','torch_lib'):
@@ -39,11 +45,15 @@ def main():
     ingest=sub.add_parser('ingest');ingest.add_argument('--watch',type=int,metavar='SECONDS')
     sub.add_parser('status')
     cat=sub.add_parser('catalog');cat.add_argument('--offset',type=int,default=0);cat.add_argument('--limit',type=int,default=20);cat.add_argument('--status');cat.add_argument('--title-query')
+    cat.add_argument('--input-mode',choices=('simple','advanced'),default='advanced')
     search=sub.add_parser('search');search.add_argument('query');search.add_argument('--limit',type=int,default=5);search.add_argument('--offset',type=int,default=0)
     search.add_argument('--after');search.add_argument('--before');search.add_argument('--date-field',choices=('added_at','modified_at','published_at'),default='added_at');search.add_argument('--sort',choices=('relevance','newest'),default='relevance');search.add_argument('--collection');search.add_argument('--no-count',action='store_true',help='Skip the exact total; retain pagination')
+    search.add_argument('--input-mode',choices=('simple','advanced'),default='advanced',help='Simple quotes literal words/phrases; advanced preserves raw FTS5 (CLI default)')
     doc=sub.add_parser('document');doc.add_argument('doc_id',type=int);doc.add_argument('--start-char',type=int,default=0);doc.add_argument('--count-chars',type=int,default=4000)
     context=sub.add_parser('context');context.add_argument('passage_id',type=int);context.add_argument('--doc-id',type=int);context.add_argument('--radius-chars',type=int,default=1000)
-    ask=sub.add_parser('ask');ask.add_argument('question');ask.add_argument('--trace',type=Path);ask.add_argument('--max-rounds',type=int,default=24)
+    ask=sub.add_parser('ask');ask.add_argument('question');ask.add_argument('--trace',type=Path);ask.add_argument('--max-rounds',type=int,help='Override response budget, including finalisation')
+    ask.add_argument('--effort',choices=('legacy','quick','balanced','thorough'),help='Override configured effort (6/12/24 responses; legacy retains previous policy)')
+    ask.add_argument('--note-tokens',type=int,help='Notebook token limit (64..32768); overrides agent_options.note_tokens, default 6000')
     sub.add_parser('model-check')
     sub.add_parser('gui')
     args=p.parse_args()
@@ -65,8 +75,8 @@ def main():
                     return
                 time.sleep(args.watch)
         elif args.command=='status':result=library.status()
-        elif args.command=='catalog':result=library.catalog(args.offset,args.limit,args.status,args.title_query)
-        elif args.command=='search':result=library.search(args.query,args.limit,args.offset,args.date_field,args.after,args.before,args.collection,args.sort,exact_count=not args.no_count)
+        elif args.command=='catalog':result=library.catalog(args.offset,args.limit,args.status,args.title_query,args.input_mode)
+        elif args.command=='search':result=library.search(args.query,args.limit,args.offset,args.date_field,args.after,args.before,args.collection,args.sort,exact_count=not args.no_count,input_mode=args.input_mode)
         elif args.command=='document':result=library.read(args.doc_id,args.start_char,args.count_chars)
         elif args.command=='context':result=library.context(args.passage_id,args.doc_id,args.radius_chars)
         else:
@@ -79,10 +89,10 @@ def main():
                 else:
                     from .agent import ask as ask_library
                     from .rerank import RerankConfig,Reranker
-                    if not 1<=args.max_rounds<=100:raise ValueError('max-rounds must be 1..100')
+                    if args.max_rounds is not None and not 1<=args.max_rounds<=100:raise ValueError('max-rounds must be 1..100')
                     rerank_config=RerankConfig(**config.get('reranker',{}))
                     reranker=Reranker(rerank_config) if rerank_config.enabled else None
-                    try:result=ask_library(library,model,args.question,max_rounds=args.max_rounds,prompts_file=config.get('prompts_file'),reranker=reranker)
+                    try:result=ask_library(library,model,args.question,max_rounds=args.max_rounds,prompts_file=config.get('prompts_file'),reranker=reranker,note_tokens=args.note_tokens if args.note_tokens is not None else config.get('agent_options',{}).get('note_tokens',6000),effort=args.effort or config.get('agent_options',{}).get('effort','legacy'))
                     finally:
                         if reranker:reranker.close()
                     if args.trace:

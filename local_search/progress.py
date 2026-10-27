@@ -17,10 +17,12 @@ def terminal(message):
 def format_progress(event):
     stats=event.get('stats',{});total=event.get('total')
     count=str(event.get('processed',0))+('/'+str(total) if total is not None else ' (total not yet known)')
-    return (f"[{event['collection']}] {event['phase']} · processed {count} · "
+    percent=f" — {100*event.get('processed',0)/total:.1f}%" if total else ''
+    return (f"[{event['collection']}] {event['phase']} · processed {count}{percent} · "
             f"indexed {stats.get('indexed',0)}, cached {stats.get('cached',0)}, "
             f"extracted {stats.get('extracted',0)}, skipped {stats.get('skipped',0)}, "
             f"errors {stats.get('errors',0)} · {event['elapsed_seconds']:.1f}s"+
+            (f" · last update {event['last_event_age_seconds']:.1f}s ago" if 'last_event_age_seconds' in event else '')+
             (' · '+event['current'] if event.get('current') else ''))
 
 
@@ -63,5 +65,5 @@ class TerminalProgress:
     def __init__(self):self.last=0
     def __call__(self,event):
         now=time.monotonic()
-        if now-self.last>=.5 or event['phase'] in ('Starting','Complete','Source failed'):
+        if now-self.last>=.5 or event['phase'] in ('Starting','Complete','Complete with errors','Cancelled','Finalising / reconciling','Source failed'):
             self.last=now;terminal(format_progress(event))

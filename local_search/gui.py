@@ -43,20 +43,24 @@ class App:
         self.vars={};self.sources=[];self.hits={};self.controls=[];self.next_offset=None;self.open_doc=None;self.next_char=None
         if self.path.exists():self.raw=json.loads(self.path.read_text('utf-8'))
         else:self.raw={'database':'data/library.sqlite3','sources':[],'model':{'context':12000,'output':2000,'gpu_layers':0,'cache_k':'f16','cache_v':'f16','thinking':False}}
-        top=ttk.Frame(root,padding=10);top.pack(fill='x')
+        style=ttk.Style(root);style.configure('TNotebook.Tab',padding=(12,6))
+        top=ttk.Frame(root,padding=(14,10));top.pack(fill='x')
         ttk.Label(top,text='Local Library Search',font=('Segoe UI',16,'bold')).pack(side='left')
         ttk.Label(top,text='Native desktop · local files · local model').pack(side='right')
-        self.tabs=ttk.Notebook(root);self.tabs.pack(fill='both',expand=True,padx=10)
-        self.search_tab=ttk.Frame(self.tabs,padding=12);self.setup_tab=ttk.Frame(self.tabs)
+        self.status_label=ttk.Label(root,textvariable=self.status,padding=(14,8),wraplength=1050)
+        self.status_label.pack(side='bottom',fill='x')
+        self.tabs=ttk.Notebook(root);self.tabs.pack(fill='both',expand=True,padx=12,pady=(0,4))
+        self.search_tab=ttk.Frame(self.tabs,padding=10);self.setup_tab=ttk.Frame(self.tabs)
+        self.setup_actions=ttk.Frame(self.setup_tab,padding=(12,8));self.setup_actions.pack(side='bottom',fill='x')
         self.setup_canvas=tk.Canvas(self.setup_tab,highlightthickness=0)
         scrollbar=ttk.Scrollbar(self.setup_tab,orient='vertical',command=self.setup_canvas.yview)
         scrollbar.pack(side='right',fill='y');self.setup_canvas.pack(side='left',fill='both',expand=True);self.setup_canvas.configure(yscrollcommand=scrollbar.set)
         self.setup=ttk.Frame(self.setup_canvas,padding=12);window=self.setup_canvas.create_window((0,0),window=self.setup,anchor='nw')
         self.setup.bind('<Configure>',lambda e:self.setup_canvas.configure(scrollregion=self.setup_canvas.bbox('all')))
         self.setup_canvas.bind('<Configure>',lambda e:self.setup_canvas.itemconfigure(window,width=e.width))
-        self.tabs.add(self.search_tab,text='Search');self.tabs.add(self.setup_tab,text='Sources & model')
-        self.build_setup();self.build_search()
-        ttk.Label(root,textvariable=self.status,padding=10,wraplength=1050).pack(fill='x')
+        self.tabs.add(self.search_tab,text='Search');self.tabs.add(self.setup_tab,text='Settings')
+        self.build_search();self.build_setup()
+        root.bind('<Configure>',self.resize_labels)
         if not self.path.exists():self.tabs.select(self.setup_tab)
         threading.Thread(target=self.worker,daemon=True).start();root.after(80,self.poll);root.after(1000,self.auto_refresh);root.protocol('WM_DELETE_WINDOW',self.close)
 
@@ -75,24 +79,38 @@ class App:
         if value:self.vars[key].set(value)
 
     def build_setup(self):
-        ttk.Label(self.setup,text=f'Settings: {self.path}',wraplength=980).pack(anchor='w')
-        box=ttk.Frame(self.setup);box.pack(fill='x',pady=4);box.columnconfigure(1,weight=1)
+        self.settings_pages=ttk.Notebook(self.setup);self.settings_pages.pack(fill='x')
+        library_page=ttk.Frame(self.settings_pages,padding=12);model_page=ttk.Frame(self.settings_pages,padding=12)
+        rank_page=ttk.Frame(self.settings_pages,padding=12);preferences=ttk.Frame(self.settings_pages,padding=12)
+        for page,label in ((library_page,'Library & sources'),(model_page,'Local model'),(rank_page,'Reranker'),(preferences,'Preferences')):
+            self.settings_pages.add(page,text=label)
+        ttk.Label(library_page,text='Choose where your index lives and which folders or clippers to include.',wraplength=760).pack(anchor='w',pady=(0,8))
+        box=ttk.Frame(library_page);box.pack(fill='x',pady=4);box.columnconfigure(1,weight=1)
         self.entry(box,0,'Library database','database',self.raw.get('database','data/library.sqlite3'),'save')
         self.entry(box,1,'Auto-refresh seconds (0 = manual)','refresh_seconds',self.raw.get('refresh_seconds',0))
-        self.entry(box,2,'Database cache MiB (1–1024, per connection)','cache_mb',self.raw.get('database_options',{}).get('cache_mb',32))
-        self.entry(box,3,'Prompt library (blank = bundled prompts.txt)','prompts_file',self.raw.get('prompts_file',''),'prompts')
-        self.source_tree=ttk.Treeview(self.setup,columns=('type','path','snapshot'),show='headings',height=4)
-        for name,label,width in [('type','Type',90),('path','Source path',650),('snapshot','Closed snapshot',120)]:
+        prefs=ttk.Frame(preferences);prefs.pack(fill='x');prefs.columnconfigure(1,weight=1)
+        self.entry(prefs,0,'Notebook token limit (64–32768)','note_tokens',self.raw.get('agent_options',{}).get('note_tokens',6000))
+        self.entry(prefs,1,'Prompt library (blank = bundled prompts.txt)','prompts_file',self.raw.get('prompts_file',''),'prompts')
+        self.entry(prefs,2,'Database cache MiB (1–1024, per connection)','cache_mb',self.raw.get('database_options',{}).get('cache_mb',32))
+        ttk.Label(preferences,text='Notebook space is part of the model context. Prompt edits apply on the next question.',wraplength=760).pack(anchor='w',pady=12)
+        ttk.Label(preferences,text=f'Settings file: {self.path}',wraplength=760).pack(anchor='w')
+        source_box=ttk.Frame(library_page);source_box.pack(fill='both',expand=True,pady=8)
+        source_box.columnconfigure(0,weight=1);source_box.rowconfigure(0,weight=1)
+        self.source_tree=ttk.Treeview(source_box,columns=('name','type','path','snapshot'),show='headings',height=7,selectmode='browse')
+        for name,label,width in [('name','Collection',120),('type','Type',80),('path','Source path',480),('snapshot','Closed snapshot',120)]:
             self.source_tree.heading(name,text=label);self.source_tree.column(name,width=width)
-        self.source_tree.pack(fill='x',pady=5)
+        self.source_tree.grid(row=0,column=0,sticky='nsew')
+        down=ttk.Scrollbar(source_box,orient='vertical',command=self.source_tree.yview);down.grid(row=0,column=1,sticky='ns')
+        across=ttk.Scrollbar(source_box,orient='horizontal',command=self.source_tree.xview);across.grid(row=1,column=0,sticky='ew')
+        self.source_tree.configure(yscrollcommand=down.set,xscrollcommand=across.set)
         self.sources=[dict(s) for s in self.raw.get('sources',[])];self.draw_sources()
-        row=ttk.Frame(self.setup);row.pack(fill='x')
+        row=ttk.Frame(library_page);row.pack(fill='x')
         self.button(row,'Add PDF folder…',lambda:self.add_source('folder'),side='left')
         self.button(row,'Add webclipper DB…',lambda:self.add_source('clipper'),side='left',padx=5)
         self.button(row,'Stop updating selected',self.remove_source,side='left')
         self.button(row,'Toggle closed snapshot',self.toggle_snapshot,side='left',padx=5)
-        ttk.Label(self.setup,text='Closed snapshot is only for a stopped clipper. Live WAL/journal files are refused.',wraplength=980).pack(anchor='w',pady=4)
-        model=ttk.LabelFrame(self.setup,text='Local GGUF model',padding=8);model.pack(fill='x',pady=8);model.columnconfigure(1,weight=1)
+        ttk.Label(library_page,text='Closed snapshot is only for a stopped clipper. Live WAL/journal files are refused.',wraplength=760).pack(anchor='w',pady=4)
+        model=ttk.LabelFrame(model_page,text='Local GGUF model',padding=8);model.pack(fill='x',pady=8);model.columnconfigure(1,weight=1)
         cfg=self.raw.get('model',{})
         self.entry(model,0,'GGUF file','path',cfg.get('path',''),'file')
         self.entry(model,1,'PyTorch DLL folder (optional)','torch_lib',cfg.get('torch_lib',''),'dir')
@@ -104,8 +122,8 @@ class App:
             ttk.Combobox(cache,textvariable=self.vars[key],values=('f16','q8_0','q4_0'),state='readonly',width=9).pack(side='left',padx=(0,18))
         for label,key,default in [('Flash Attention','flash_attention',False),('KV offload','kv_offload',True),('Thinking','thinking',False)]:
             self.vars[key]=tk.BooleanVar(value=cfg.get(key,default));ttk.Checkbutton(cache,text=label,variable=self.vars[key]).pack(side='left',padx=5)
-        ttk.Label(model,text='F16 uses more cache memory; Q8/Q4 use less. Quantized V requires Flash Attention. Leave GPU headroom for your display; use fewer GPU layers or a smaller context.',wraplength=960).grid(row=6,column=0,columnspan=3,sticky='w',pady=5)
-        rank=ttk.LabelFrame(self.setup,text='Optional reranker — model searches only',padding=8);rank.pack(fill='x',pady=8);rank.columnconfigure(1,weight=1)
+        ttk.Label(model,text='F16 uses more cache memory; Q8/Q4 use less. Quantized V requires Flash Attention. Leave GPU headroom for your display; use fewer GPU layers or a smaller context.',wraplength=720).grid(row=6,column=0,columnspan=3,sticky='w',pady=5)
+        rank=ttk.LabelFrame(rank_page,text='Optional reranker — model searches only',padding=8);rank.pack(fill='x',pady=8);rank.columnconfigure(1,weight=1)
         cfg=self.raw.get('reranker',{})
         self.vars['rerank_enabled']=tk.BooleanVar(value=cfg.get('enabled',False))
         ttk.Checkbutton(rank,text='Enable reranking',variable=self.vars['rerank_enabled']).grid(row=0,column=0,sticky='w')
@@ -117,18 +135,20 @@ class App:
                                       (6,'Pair token budget','max_pair_tokens',512),(7,'Scoring timeout seconds','timeout_seconds',5),
                                       (8,'Startup timeout seconds','startup_seconds',60)]:
             self.entry(rank,row,label,'rerank_'+key,cfg.get(key,default))
-        ttk.Label(rank,text='Ranks FTS passages against your question. CPU is default; CUDA requires GPU-enabled PyTorch and shares VRAM with the GGUF and display. Larger pools cost more time. Direct FTS searches are unchanged.',wraplength=960).grid(row=9,column=0,columnspan=3,sticky='w',pady=5)
-        actions=ttk.Frame(self.setup);actions.pack(fill='x',pady=4)
+        ttk.Label(rank,text='Ranks FTS passages against your question. CPU is default; CUDA requires GPU-enabled PyTorch and shares VRAM with the GGUF and display. Larger pools cost more time. Direct FTS searches are unchanged.',wraplength=720).grid(row=9,column=0,columnspan=3,sticky='w',pady=5)
+        actions=self.setup_actions
         self.button(actions,'Save settings',self.save,side='left')
         self.button(actions,'Refresh index',self.ingest,side='left',padx=5)
         self.button(actions,'Index status',self.index_status,side='left')
-        self.button(actions,'Load & test GGUF',self.model_check,side='left',padx=5)
-        self.button(actions,'Unload model',lambda:self.submit(self.unload),side='left')
-        self.button(actions,'Unload / reset reranker',lambda:self.submit(self.unload_reranker),side='left',padx=5)
+        ttk.Label(actions,text='Changes apply on the next operation.').pack(side='right',padx=8)
+        model_actions=ttk.Frame(model_page);model_actions.pack(fill='x',pady=8)
+        self.button(model_actions,'Load & test model',self.model_check,side='left')
+        self.button(model_actions,'Unload model',lambda:self.submit(self.unload),side='left',padx=6)
+        self.button(rank_page,'Unload / reset reranker',lambda:self.submit(self.unload_reranker),side='left',padx=5)
 
     def draw_sources(self):
         self.source_tree.delete(*self.source_tree.get_children())
-        for i,s in enumerate(self.sources):self.source_tree.insert('', 'end',iid=str(i),values=(s['type'],s['path'],'yes' if s.get('closed_snapshot') else 'no'))
+        for i,s in enumerate(self.sources):self.source_tree.insert('', 'end',iid=str(i),values=(s['name'],s['type'],s['path'],'export' if s.get('network_mode')=='export' else 'yes' if s.get('closed_snapshot') or s.get('network_mode')=='closed_snapshot' else 'no'))
 
     def add_source(self,kind):
         path=filedialog.askdirectory(parent=self.root) if kind=='folder' else filedialog.askopenfilename(parent=self.root,filetypes=[('SQLite database','*.db *.sqlite *.sqlite3'),('All files','*')])
@@ -161,6 +181,10 @@ class App:
             if interval!=0 and interval<10:raise ValueError('Auto-refresh must be 0 or at least 10 seconds.')
             data={**self.raw,'database':self.vars['database'].get(),'refresh_seconds':interval,'sources':self.sources,'model':{**self.raw.get('model',{}),**model}}
             data['database_options']={'cache_mb':cache_mb}
+            note_tokens=int(self.vars['note_tokens'].get())
+            if not 64<=note_tokens<=32768:raise ValueError('Notebook budget must be 64..32768 tokens.')
+            data['agent_options']={**self.raw.get('agent_options',{}),'note_tokens':note_tokens,'effort':self.effort.get()}
+            data['search_input_mode']=self.search_input_mode.get()
             from .rerank import RerankConfig
             from dataclasses import asdict
             rank={'enabled':self.vars['rerank_enabled'].get(),'device':self.vars['rerank_device'].get(),'model_dir':self.vars['rerank_model_dir'].get().strip()}
@@ -182,44 +206,126 @@ class App:
         from .__main__ import configuration
         return configuration(self.path)
 
+    def resize_labels(self,event):
+        if event.widget is self.root:
+            width=max(320,event.width-48)
+            self.status_label.configure(wraplength=width)
+            self.metrics_label.configure(wraplength=width)
+
+    def search_help(self):
+        messagebox.showinfo('Search input',
+            'Simple: words are ANDed; use "quoted phrases". ABC-123 is safe. Unmatched quotes report an error.\n\nAdvanced FTS5: use AND, OR, binary NOT, prefixes and NEAR.\nNEAR(export control, 5)\nNEAR("critical minerals" "supply chain", 10)\nNEAR("ABC-123" approval, 6)\n\nNEAR is unordered within an indexed passage. Hyphenated identifiers may also match spacing variants.\n\nEnter searches the library. Ctrl+Enter asks the model.',parent=self.root)
+
+    def toggle_filters(self):
+        if self.filters_visible.get():self.filter_panel.grid()
+        else:self.filter_panel.grid_remove()
+
+    def effort_changed(self,value=None):
+        modes=('quick','balanced','thorough')
+        self.effort.set('legacy' if self.legacy_policy.get() else modes[max(0,min(2,round(self.effort_level.get())))])
+
     def build_search(self):
-        ttk.Label(self.search_tab,text='Ingestion progress').pack(anchor='w')
-        self.ingest_bar=ttk.Progressbar(self.search_tab,mode='determinate',maximum=1,value=0)
-        self.ingest_bar.pack(fill='x',pady=(0,5))
+        self.search_tab.columnconfigure(0,weight=1);self.search_tab.rowconfigure(2,weight=1)
+        query=ttk.LabelFrame(self.search_tab,text='Search your library',padding=10)
+        query.grid(row=0,column=0,sticky='ew',pady=(0,8));query.columnconfigure(0,weight=1)
         self.question=tk.StringVar()
-        ttk.Label(self.search_tab,text='Search terms or a question').pack(anchor='w')
-        ttk.Entry(self.search_tab,textvariable=self.question).pack(fill='x',pady=5)
-        row=ttk.Frame(self.search_tab);row.pack(fill='x')
-        self.button(row,'Search FTS5',self.search,side='left')
-        self.button(row,'Ask local model',self.question_model,side='left',padx=5)
-        self.button(row,'Browse documents',self.browse,side='left')
-        self.button(row,'More results',self.more_results,side='left',padx=5)
-        self.stop=ttk.Button(row,text='Stop inference',command=self.cancel.set,state='disabled');self.stop.pack(side='right')
-        filters=ttk.Frame(self.search_tab);filters.pack(fill='x',pady=6)
-        self.date_field=tk.StringVar(value='added_at');self.after=tk.StringVar();self.before=tk.StringVar();self.sort=tk.StringVar(value='relevance')
-        ttk.Label(filters,text='Date').pack(side='left');ttk.Combobox(filters,textvariable=self.date_field,values=('added_at','modified_at','published_at'),width=15,state='readonly').pack(side='left',padx=5)
-        for label,var in [('After',self.after),('Before',self.before)]:ttk.Label(filters,text=label).pack(side='left');ttk.Entry(filters,textvariable=var,width=13).pack(side='left',padx=5)
-        ttk.Combobox(filters,textvariable=self.sort,values=('relevance','newest'),width=12,state='readonly').pack(side='left')
+        self.question_entry=ttk.Entry(query,textvariable=self.question,font=('Segoe UI',11))
+        self.question_entry.grid(row=0,column=0,sticky='ew',ipady=4)
+        self.question_entry.bind('<Return>',lambda event:self.search() if not self.busy else None)
+        self.question_entry.bind('<Control-Return>',lambda event:self.question_model() if not self.busy else None)
+        row=ttk.Frame(query);row.grid(row=1,column=0,sticky='ew',pady=(8,0))
+        self.button(row,'Search library',self.search,side='left')
+        self.button(row,'Ask local model',self.question_model,side='left',padx=6)
+        self.button(row,'Browse sources',self.browse,side='left')
+        self.stop=ttk.Button(row,text='Stop operation',command=self.cancel.set,state='disabled');self.stop.pack(side='right')
+        self.filters_visible=tk.BooleanVar(value=False)
+        ttk.Checkbutton(row,text='Search options',variable=self.filters_visible,command=self.toggle_filters).pack(side='right',padx=10)
+        effort_row=ttk.Frame(query);effort_row.grid(row=2,column=0,sticky='ew',pady=(8,0))
+        configured=self.raw.get('agent_options',{}).get('effort','legacy');modes=('quick','balanced','thorough')
+        self.effort=tk.StringVar(value=configured);self.effort_level=tk.DoubleVar(value=modes.index(configured) if configured in modes else 1)
+        self.legacy_policy=tk.BooleanVar(value=configured=='legacy')
+        ttk.Label(effort_row,text='Answer effort').pack(side='left')
+        slider=ttk.Frame(effort_row);slider.pack(side='left',padx=10)
+        scale=ttk.Scale(slider,from_=0,to=2,variable=self.effort_level,command=self.effort_changed,length=210)
+        scale.grid(row=0,column=0,columnspan=3,sticky='ew')
+        scale.bind('<ButtonRelease-1>',lambda event:scale.set(round(self.effort_level.get())))
+        for i,label in enumerate(('Quick','Balanced','Thorough')):
+            slider.columnconfigure(i,weight=1);ttk.Label(slider,text=label).grid(row=1,column=i)
+        ttk.Label(effort_row,textvariable=self.effort,width=10).pack(side='left',padx=4)
+        ttk.Checkbutton(effort_row,text='Legacy policy (comparison)',variable=self.legacy_policy,command=self.effort_changed).pack(side='left')
+
+        self.filter_panel=ttk.LabelFrame(self.search_tab,text='Search options — library searches',padding=10)
+        self.filter_panel.grid(row=1,column=0,sticky='ew',pady=(0,8));self.filter_panel.columnconfigure(5,weight=1)
+        self.search_input_mode=tk.StringVar(value=self.raw.get('search_input_mode','simple'))
+        ttk.Label(self.filter_panel,text='Input').grid(row=0,column=0,sticky='w')
+        ttk.Combobox(self.filter_panel,textvariable=self.search_input_mode,values=('simple','advanced'),state='readonly',width=10).grid(row=0,column=1,sticky='w',padx=(6,16))
+        ttk.Button(self.filter_panel,text='Search help',command=self.search_help).grid(row=0,column=2,sticky='w')
         self.exact_count=tk.BooleanVar(value=False)
-        ttk.Checkbutton(filters,text='Exact total (may be slower)',variable=self.exact_count).pack(side='left',padx=8)
-        ttk.Label(self.search_tab,text='Dates use YYYY-MM-DD; added is capture/file creation, not publication. Double-click a result for surrounding text.').pack(anchor='w')
-        self.tree=ttk.Treeview(self.search_tab,columns=('title','copies','date','preview'),show='headings',height=10)
-        for name,label,width in [('title','Source',230),('copies','Locations',65),('date','Date',150),('preview','Text',500)]:self.tree.heading(name,text=label);self.tree.column(name,width=width)
-        self.tree.pack(fill='both',expand=True,pady=7);self.tree.bind('<Double-1>',self.expand)
-        pages=ttk.Frame(self.search_tab);pages.pack(fill='x')
-        self.button(pages,'Read document from start',self.read_document,side='left')
-        self.button(pages,'Next document page',lambda:self.read_document(next_page=True),side='left',padx=5)
-        self.output=ScrolledText(self.search_tab,wrap='word',height=13,font=('Segoe UI',10));self.output.pack(fill='both',expand=True)
-        self.live_visible=tk.BooleanVar(value=False)
-        self.live=ScrolledText(self.search_tab,wrap='word',height=5,state='disabled')
-        ttk.Checkbutton(self.search_tab,text='Show live model output: thinking / action JSON (unvalidated)',variable=self.live_visible,command=lambda:self.live.pack(fill='x') if self.live_visible.get() else self.live.pack_forget()).pack(anchor='w')
-        self.metrics=tk.StringVar();ttk.Label(self.search_tab,textvariable=self.metrics,wraplength=1000).pack(anchor='w')
-        self.timing_visible=tk.BooleanVar(value=False)
-        self.timing_details=ScrolledText(self.search_tab,wrap='word',height=8,state='disabled')
-        ttk.Checkbutton(self.search_tab,text='Show question timing breakdown',variable=self.timing_visible,command=lambda:self.timing_details.pack(fill='x') if self.timing_visible.get() else self.timing_details.pack_forget()).pack(anchor='w')
+        ttk.Checkbutton(self.filter_panel,text='Count all matches',variable=self.exact_count).grid(row=0,column=3,columnspan=3,sticky='w',padx=12)
+        self.date_field=tk.StringVar(value='added_at');self.after=tk.StringVar();self.before=tk.StringVar();self.sort=tk.StringVar(value='relevance')
+        ttk.Label(self.filter_panel,text='Date type').grid(row=1,column=0,sticky='w',pady=(8,0))
+        ttk.Combobox(self.filter_panel,textvariable=self.date_field,values=('added_at','modified_at','published_at'),width=13,state='readonly').grid(row=1,column=1,sticky='w',padx=(6,16),pady=(8,0))
+        for column,label,var in ((2,'After',self.after),(4,'Before',self.before)):
+            ttk.Label(self.filter_panel,text=label).grid(row=1,column=column,sticky='w',pady=(8,0))
+            ttk.Entry(self.filter_panel,textvariable=var,width=12).grid(row=1,column=column+1,sticky='w',padx=6,pady=(8,0))
+        ttk.Label(self.filter_panel,text='Order').grid(row=2,column=0,sticky='w',pady=(8,0))
+        ttk.Combobox(self.filter_panel,textvariable=self.sort,values=('relevance','newest'),width=13,state='readonly').grid(row=2,column=1,sticky='w',padx=(6,16),pady=(8,0))
+        ttk.Label(self.filter_panel,text='YYYY-MM-DD · added/captured dates do not establish publication.',wraplength=470).grid(row=2,column=2,columnspan=4,sticky='w',pady=(8,0))
+        self.filter_panel.grid_remove()
+
+        self.workspace=ttk.Panedwindow(self.search_tab,orient='horizontal')
+        self.workspace.grid(row=2,column=0,sticky='nsew')
+        results=ttk.LabelFrame(self.workspace,text='Library results',padding=8)
+        results.columnconfigure(0,weight=1);results.rowconfigure(1,weight=1)
+        self.result_summary=tk.StringVar(value='Search or browse to see sources here.')
+        summary_label=ttk.Label(results,textvariable=self.result_summary,wraplength=340)
+        summary_label.grid(row=0,column=0,sticky='w',pady=(0,6))
+        results.bind('<Configure>',lambda event:summary_label.configure(wraplength=max(150,event.width-20)))
+        table=ttk.Frame(results);table.grid(row=1,column=0,sticky='nsew');table.columnconfigure(0,weight=1);table.rowconfigure(0,weight=1)
+        self.tree=ttk.Treeview(table,columns=('title','copies','date','preview'),displaycolumns=('title','copies','date'),show='headings',height=8,selectmode='browse')
+        for name,label,width in [('title','Source',210),('copies','Copies',50),('date','Date',110),('preview','Text',260)]:
+            self.tree.heading(name,text=label);self.tree.column(name,width=width,minwidth=45,stretch=name=='title')
+        self.tree.grid(row=0,column=0,sticky='nsew')
+        scroll=ttk.Scrollbar(table,orient='vertical',command=self.tree.yview);scroll.grid(row=0,column=1,sticky='ns')
+        across=ttk.Scrollbar(table,orient='horizontal',command=self.tree.xview);across.grid(row=1,column=0,sticky='ew')
+        self.tree.configure(yscrollcommand=scroll.set,xscrollcommand=across.set)
+        self.tree.bind('<<TreeviewSelect>>',self.preview_result);self.tree.bind('<Double-1>',self.expand)
+        ttk.Label(results,text='Select to preview · double-click for context',wraplength=340).grid(row=2,column=0,sticky='w',pady=6)
+        pages=ttk.Frame(results);pages.grid(row=3,column=0,sticky='ew')
+        self.button(pages,'More results',self.more_results,side='left')
+        self.button(pages,'Read source',self.read_document,side='left',padx=4)
+        self.button(pages,'Next page',lambda:self.read_document(next_page=True),side='left')
+        self.detail_tabs=ttk.Notebook(self.workspace)
+        self.answer_tab=ttk.Frame(self.detail_tabs,padding=6);activity=ttk.Frame(self.detail_tabs,padding=6);timing=ttk.Frame(self.detail_tabs,padding=6)
+        self.detail_tabs.add(self.answer_tab,text='Answer / source');self.detail_tabs.add(activity,text='Activity');self.detail_tabs.add(timing,text='Timing')
+        self.output=ScrolledText(self.answer_tab,wrap='word',height=8,width=30,font=('Segoe UI',10),padx=10,pady=10,relief='flat')
+        self.output.pack(fill='both',expand=True)
+        activity_label=ttk.Label(activity,text='Live model output and evidence checklist · unvalidated',wraplength=500)
+        activity_label.pack(anchor='w',pady=(0,6))
+        activity.bind('<Configure>',lambda event:activity_label.configure(wraplength=max(150,event.width-16)))
+        self.live=ScrolledText(activity,wrap='word',height=8,width=30,font=('Consolas',9),padx=8,pady=8,state='disabled',relief='flat');self.live.pack(fill='both',expand=True)
+        self.timing_details=ScrolledText(timing,wrap='word',height=8,width=30,font=('Consolas',9),padx=8,pady=8,state='disabled',relief='flat');self.timing_details.pack(fill='both',expand=True)
+        self.workspace.add(results,weight=2);self.workspace.add(self.detail_tabs,weight=3)
+        self.metrics=tk.StringVar();self.metrics_label=ttk.Label(self.search_tab,textvariable=self.metrics,wraplength=1000)
+        self.metrics_label.grid(row=3,column=0,sticky='ew',pady=(6,3))
+        self.ingest_bar=ttk.Progressbar(self.search_tab,mode='determinate',maximum=1,value=0)
+        self.ingest_bar.grid(row=4,column=0,sticky='ew',pady=(2,0))
+        self.show('Ask a question or search your library.\n\nAnswers, source passages and clickable citations appear here. Use Activity to follow progress and Timing for the detailed breakdown.')
+
+    def preview_result(self,event=None):
+        if self.busy:return
+        selected=self.tree.selection()
+        if not selected or selected[0] not in self.hits:return
+        hit=self.hits[selected[0]]
+        if 'passage_id' in hit:
+            self.show(hit['text'])
+            self.source_links([dict(location,id=location['source_id']) for location in hit['locations']])
+        else:
+            self.show(hit['title']+'\n'+hit['locator']+'\n\nStatus: '+hit['status']+'\n'+hit.get('detail',''))
 
     def show(self,text):
         self.hide_hint()
+        self.detail_tabs.select(self.answer_tab)
         for tag in self.output.tag_names():
             if tag.startswith('source-'):self.output.tag_delete(tag)
         self.output.delete('1.0','end');self.output.insert('end',text)
@@ -270,7 +376,9 @@ class App:
         if not latest:return
         original,received=latest;event=dict(original)
         event['elapsed_seconds']+=time.monotonic()-received
-        prefix='' if event['collection']=='library' else f"Source {event.get('source_number',1)}/{event.get('source_count',1)} · "
+        event['last_event_age_seconds']=time.monotonic()-received
+        prefix=(f"Source {event['source_number']}/{event.get('source_count',1)} ({event.get('source_collection',event['collection'])}) · "
+                if event.get('source_number',0)>0 else '' if event['collection']=='library' else f"Source 1/{event.get('source_count',1)} · ")
         self.status.set(prefix+format_progress(event))
         if event.get('total') is not None:
             self.ingest_bar.stop();self.ingest_bar.configure(mode='determinate',maximum=max(1,event['total']),value=event['processed'])
@@ -283,7 +391,7 @@ class App:
         self.metrics.set('')
         self.timing_details.configure(state='normal');self.timing_details.delete('1.0','end');self.timing_details.configure(state='disabled')
         for c in self.controls:c.configure(state='disabled')
-        self.stop.configure(state='normal' if inference else 'disabled')
+        self.stop.configure(state='normal' if inference or self.ingesting else 'disabled')
         self.jobs.put((work,callback))
         self.operation_started=time.perf_counter()
 
@@ -307,6 +415,11 @@ class App:
             if event['type']=='text':text.append(event['text'])
             elif event['type']=='round':text.append(f"\n--- Model round {event['round']} ---\n")
             elif event['type']=='phase':self.status.set(event['text'])
+            elif event['type']=='notebook':
+                text.append(f"\nNotebook: {event['used_tokens']}/{event['limit_tokens']} tokens, {event['remaining_tokens']} free, {event['items']} items.\n")
+                if event.get('error'):text.append('Save rejected: '+event['error']+'\n')
+            elif event['type']=='coverage':
+                text.append('\nEvidence checklist:\n'+'\n'.join(item['status']+': '+item['need'] for item in event['items'])+'\n')
         if text:
             self.live.configure(state='normal');self.live.insert('end',''.join(text))
             if int(self.live.index('end-1c').split('.')[0])>1000:self.live.delete('1.0','end-1000lines')
@@ -336,17 +449,18 @@ class App:
         def work():
             self.ingest_progress({'type':'ingest_progress','collection':'library','phase':'Opening database','current':config['database'],
                                   'processed':0,'total':None,'stats':{},'elapsed_seconds':0,'source_count':len(config['sources'])})
-            return refresh(self.get_library(config),config,on_progress=self.ingest_progress)
+            return refresh(self.get_library(config),config,on_progress=self.ingest_progress,cancel_event=self.cancel)
         self.next_refresh=time.monotonic()+max(10,int(self.raw.get('refresh_seconds',0)))
         self.ingesting=True
         with self.ingest_lock:self.ingest_latest=None
         self.ingest_bar.configure(mode='indeterminate');self.ingest_bar.start(80)
         def show(reports):
-            count=sum(r.get('indexed',0)+r.get('skipped',0)+r.get('errors',0) for r in reports)
+            count=sum(r.get('processed',r.get('indexed',0)+r.get('skipped',0)+r.get('errors',0)) for r in reports)
             errors=sum(r.get('errors',0)+len(r.get('scan_errors',[]))+('error' in r) for r in reports)
             skipped=sum(r.get('skipped',0) for r in reports);cached=sum(r.get('cached',0) for r in reports)
-            self.ingest_bar.configure(mode='determinate',maximum=1,value=1)
-            self.status.set(f'Refresh finished: {count} items processed, {cached} cached, {skipped} skipped, {errors} errors. Log: '+str(Path(config['database']).parent/'ingestion.log'))
+            cancelled=any(r.get('cancelled') for r in reports)
+            if not cancelled:self.ingest_bar.configure(mode='determinate',maximum=1,value=1)
+            self.status.set(('Refresh cancelled' if cancelled else 'Refresh complete with errors' if errors else 'Refresh complete')+f': {count} items processed, {cached} cached, {skipped} skipped, {errors} errors. Log: '+str(Path(config['database']).parent/'ingestion.log'))
             if not automatic:self.display_report(reports)
         self.submit(work,show)
 
@@ -369,7 +483,10 @@ class App:
 
     def search(self,offset=0):
         if not self.save():return
-        config=self.cfg();query=self.question.get();options=dict(after=self.after.get() or None,before=self.before.get() or None,date_field=self.date_field.get(),sort=self.sort.get(),limit=20,offset=offset,exact_count=self.exact_count.get())
+        config=self.cfg();query=self.question.get();options=dict(after=self.after.get() or None,before=self.before.get() or None,date_field=self.date_field.get(),sort=self.sort.get(),limit=20,offset=offset,exact_count=self.exact_count.get(),input_mode=self.search_input_mode.get())
+        if offset and getattr(self,'search_request',None):
+            query,options=self.search_request;options=dict(options,offset=offset)
+        else:self.search_request=(query,dict(options))
         submitted=time.perf_counter()
         def work():
             started=time.perf_counter();lib=self.get_library(config);opened=time.perf_counter()
@@ -379,11 +496,12 @@ class App:
         def show(result):
             render_started=time.perf_counter()
             self.next_offset=result['next_offset'];self.result_mode='search'
+            self.result_summary.set(str(len(result['results']))+' passages on this page'+(' · more available' if self.next_offset is not None else ''))
             self.tree.delete(*self.tree.get_children());self.hits={}
             for i,hit in enumerate(result['results']):
                 self.hits[str(i)]=hit;loc=hit['locations'][0]
                 self.tree.insert('','end',iid=str(i),values=(loc['title'],hit['location_count'],hit['newest'] or 'unknown',hit['text'][:200]))
-            total=result['total_unique_passages'];self.show((f'{total} unique passages.' if total is not None else 'Exact total not requested.')+' Showing up to 20.\n'+result['date_note'])
+            total=result['total_unique_passages'];self.show((f'{total} unique passages.' if total is not None else 'Exact total not requested.')+' Showing up to 20.\n'+result['date_note']+'\nCompiled FTS5: '+result['query'])
             self.source_links([dict(id=h['locations'][0]['source_id'],**{k:v for k,v in h['locations'][0].items() if k!='source_id'}) for h in result['results']])
             result['timings']['render_seconds']=time.perf_counter()-render_started
             self.metrics.set('Search: '+', '.join(f"{k.removesuffix('_seconds')} {v*1000:.1f}ms" for k,v in result['timings'].items()))
@@ -401,6 +519,7 @@ class App:
             return self.get_library(config).catalog(offset=offset,limit=50)
         def show(rows):
             self.tree.delete(*self.tree.get_children());self.hits={};self.result_mode='catalog';self.next_offset=offset+len(rows) if len(rows)==50 else None
+            self.result_summary.set(str(len(rows))+' sources on this page'+(' · more available' if self.next_offset is not None else ''))
             for i,row in enumerate(rows):
                 self.hits[str(i)]=row
                 self.tree.insert('','end',iid=str(i),values=(row['title'],1,row['added_at'] or 'unknown',row['status']+' · '+row['locator']))
@@ -494,7 +613,7 @@ class App:
             clock['load_seconds']=time.perf_counter()-started
             started=time.perf_counter();library=self.get_library(config)
             clock['library_seconds']=time.perf_counter()-started
-            result=ask(library,model,question,on_event=self.emit,prompts_file=config.get('prompts_file'),reranker=self.loaded_reranker(config))
+            result=ask(library,model,question,on_event=self.emit,prompts_file=config.get('prompts_file'),reranker=self.loaded_reranker(config),note_tokens=config.get('agent_options',{}).get('note_tokens',6000),effort=config.get('agent_options',{}).get('effort','legacy'))
             result['timings']['load_seconds']=clock['load_seconds']
             trace=Path(config['database']).parent/'last-gui-search.json'
             with self.trace_lock:trace.write_text(json.dumps(result,ensure_ascii=False,indent=2),'utf-8')
@@ -502,7 +621,9 @@ class App:
             return result
         def show(result):
             render_started=time.perf_counter()
-            self.show(result.get('answer') or result['status']);self.source_links(result.get('sources',[]))
+            display=result.get('answer') or result['status']
+            if result.get('gaps'):display+='\n\nUnresolved points:\n'+'\n'.join('• '+gap for gap in result['gaps'])
+            self.show(display);self.source_links(result.get('sources',[]))
             self.output.update_idletasks()
             completed=time.perf_counter()
             timing=complete_timing(result,clicked,submitted,clock['worker_started'],clock['worker_finished'],render_started,completed,clock['load_seconds'],clock['library_seconds'])
@@ -510,11 +631,15 @@ class App:
             self.timing_details.configure(state='normal');self.timing_details.delete('1.0','end');self.timing_details.insert('end',format_timing(timing));self.timing_details.configure(state='disabled')
             checks=result.get('context_checks',[])
             rates=[c['timings']['approx_decode_tokens_per_second'] for c in checks if c.get('timings',{}).get('approx_decode_tokens_per_second') is not None]
-            label='Click → final answer complete' if result['status']=='answered' else 'Click → stopped ('+result['status']+')'
+            label='Click → final answer complete' if result['status'] in ('answered','answered_with_gaps') else 'Click → stopped ('+result['status']+')'
             self.metrics.set(f"{label}: {timing['click_to_complete_seconds']:.2f}s | FTS searches {result['timings']['fts_search_seconds']:.2f}s | {timing['model_rounds']} model rounds"+(f' | Last round ~{rates[-1]:.1f} tok/s' if rates else '')+' | See timing breakdown')
             if 'reranking' in result:
                 applied=sum(t['rerank']['applied'] for t in result['reranking']);fallbacks=[t['rerank']['reason'] for t in result['reranking'] if t['rerank']['reason']]
                 self.metrics.set(self.metrics.get()+f" | Rerank {result['timings'].get('rerank_seconds',0):.2f}s ({applied} applied)"+(' | Fallback: '+', '.join(dict.fromkeys(fallbacks)) if fallbacks else ''))
+            if 'notebook' in result:
+                usage=result['notebook']
+                self.metrics.set(self.metrics.get()+f" | Notebook {usage['used_tokens']}/{usage['limit_tokens']} tokens ({usage['items']} items)")
+            self.metrics.set(self.metrics.get()+' | '+result.get('effort','legacy')+' · '+result.get('stop_reason',result['status']))
             # Save final GUI measurements after the answer is displayed. This background
             # persistence is deliberately outside click-to-answer completion time.
             trace=Path(config['database']).parent/'last-gui-search.json'

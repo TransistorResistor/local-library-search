@@ -7,6 +7,8 @@ import time
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
+from .sqlite_paths import network_path
+from .query import compile_query
 
 
 def utc_now():
@@ -50,7 +52,9 @@ class Library:
         started=time.perf_counter()
         cache_mb=int(cache_mb)
         if not 1<=cache_mb<=1024:raise ValueError('Database cache must be 1..1024 MiB per connection')
-        self.path=Path(path).resolve();self.path.parent.mkdir(parents=True,exist_ok=True)
+        self.path=Path(path).resolve()
+        if network_path(self.path):raise ValueError('The active search library must be on local storage; network paths are only supported as clipper sources')
+        self.path.parent.mkdir(parents=True,exist_ok=True)
         self.db=sqlite3.connect(self.path,timeout=30)
         self.db.row_factory=sqlite3.Row
         self.db.execute(f'PRAGMA cache_size={-cache_mb*1024}')
@@ -146,10 +150,12 @@ class Library:
                     passage_occurrences=self.db.execute('SELECT count(*) FROM locations').fetchone()[0],
                     sources=[dict(r) for r in self.db.execute('SELECT collection,status,count(*) AS count FROM sources GROUP BY collection,status')])
 
-    def catalog(self,offset=0,limit=20,status=None,title_query=None):
+    def catalog(self,offset=0,limit=20,status=None,title_query=None,input_mode='advanced'):
         offset=max(0,int(offset));limit=max(1,min(50,int(limit)))
         clauses=['status=?'] if status else [];params=[status] if status else []
-        if title_query:clauses.append('id IN (SELECT rowid FROM title_fts WHERE title_fts MATCH ?)');params.append(title_query)
+        if title_query is not None:
+            title_query=compile_query(title_query,input_mode)
+            clauses.append('id IN (SELECT rowid FROM title_fts WHERE title_fts MATCH ?)');params.append(title_query)
         where='WHERE '+' AND '.join(clauses) if clauses else ''
         return [dict(r) for r in self.db.execute(f'SELECT id,doc_id,title,locator,collection,added_at,added_basis,modified_at,published_at,date_precision,status,detail FROM sources {where} ORDER BY id LIMIT ? OFFSET ?',params+[limit,offset])]
 
@@ -170,9 +176,9 @@ class Library:
         if collection:clauses.append('s.collection=?');params.append(collection)
         return ' AND '.join(clauses),params
 
-    def search(self,query,limit=5,offset=0,date_field='added_at',after=None,before=None,collection=None,sort='relevance',exact_count=True):
+    def search(self,query=None,limit=5,offset=0,date_field='added_at',after=None,before=None,collection=None,sort='relevance',exact_count=True,input_mode='advanced',**structured):
         started=time.perf_counter()
-        if not isinstance(query,str) or not query.strip() or len(query)>4000:raise ValueError('query must be a nonempty FTS5 string of at most 4000 characters')
+        query=compile_query(query,input_mode,**structured)
         if collection is not None and not isinstance(collection,str):raise ValueError('collection must be a string')
         if sort not in ('relevance','newest'):raise ValueError('sort must be relevance or newest')
         limit=max(1,min(20,int(limit)));offset=max(0,int(offset))

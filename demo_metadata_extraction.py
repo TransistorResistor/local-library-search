@@ -63,7 +63,9 @@ def read_ids(path):
 
 def read_sources(database,ids):
     """Short read-only snapshot, no Library constructor, schema maintenance or writes."""
-    db=sqlite3.connect(Path(database).resolve().as_uri()+'?mode=ro',uri=True,timeout=30)
+    from local_search.sqlite_paths import connect_readonly,network_path
+    if network_path(Path(database).resolve()):raise ValueError('The authoritative search library must be local; copy a supported completed export to local storage first')
+    db=connect_readonly(database,timeout=30)
     db.row_factory=sqlite3.Row
     try:
         db.execute('PRAGMA query_only=ON');db.execute('BEGIN')

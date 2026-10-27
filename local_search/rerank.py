@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import time
+from .query import normalise_search
 
 
 @dataclass(frozen=True)
@@ -139,7 +140,7 @@ class QuestionSearch:
         finally:self.fts_seconds+=time.perf_counter()-started
 
     def search(self,**args):
-        args=dict(args);scope=args.pop('search_scope','shortlist');relevance=args.pop('relevance_query',self.question)
+        args=normalise_search(args);scope=args.pop('search_scope','shortlist');relevance=args.pop('relevance_query',self.question)
         if scope not in ('shortlist','exhaustive'):raise ValueError('search_scope must be shortlist or exhaustive')
         if not isinstance(relevance,str) or not relevance.strip() or len(relevance)>8000:raise ValueError('relevance_query must be nonempty text of at most 8000 characters')
         if scope=='exhaustive' or args.get('sort')=='newest':

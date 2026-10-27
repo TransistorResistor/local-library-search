@@ -42,5 +42,10 @@
     "max_pair_tokens": 512,
     "timeout_seconds": 5,
     "startup_seconds": 60
-  }
+  },
+  "agent_options": {
+    "note_tokens": 6000,
+    "effort": "legacy"
+  },
+  "search_input_mode": "simple"
 }

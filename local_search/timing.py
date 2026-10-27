@@ -24,7 +24,7 @@ def complete_timing(result,clicked,submitted,worker_started,worker_finished,rend
 
 
 def format_timing(timing):
-    label='Click → final answer complete' if timing['status']=='answered' else 'Click → stopped ('+timing['status']+')'
+    label='Click → final answer complete' if timing['status'] in ('answered','answered_with_gaps') else 'Click → stopped ('+timing['status']+')'
     text=f"{label}: {timing['click_to_complete_seconds']:.3f}s\n"
     text+='\n'.join(f'{name}: {seconds:.3f}s' for name,seconds in timing['stages_seconds'].items())
     text+=f"\nModel rounds: {timing['model_rounds']}"
