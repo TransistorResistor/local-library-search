@@ -37,7 +37,7 @@ The desktop app already provides a persistent SQLite FTS5 library, webclipper in
 
 Implement one feature at a time and check it against the current behaviour. Keep lexical search, source evidence and the existing context cap as the foundation. Improvements in latency, convenience or metadata coverage do not by themselves establish improved answer correctness.
 
-No automatic source-file changes, OCR requirement, model download or cloud enrichment is introduced. The user subsequently authorised an optional larger context cap; the implementation exposes a 64k preset while preserving existing defaults. Generated metadata and operational logs remain local application state. Published source releases continue to exclude personal paths, credentials, documents, databases, model weights, demo data and evaluation scripts/artifacts.
+No automatic source-file changes, OCR requirement, model download or cloud enrichment is introduced. The user subsequently authorised an optional larger context cap; the implementation exposes a 64k preset while preserving existing defaults. Generated metadata and operational logs remain local application state. Published source releases continue to exclude personal paths, credentials, documents, databases, model weights, demo data and evaluation scripts/artifacts. The generic standalone metadata-extraction demo and its guide are explicitly approved for publication; source-ID selections and generated review reports remain excluded.
 
 ## Priority and dependency order
 

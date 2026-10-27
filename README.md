@@ -62,7 +62,7 @@ Draft instructions for future metadata extraction...
 
 `search.system` supplies the system prompt for **Ask local model** and the CLI `ask` command. Its initial text matches the previous built-in prompt. Preserve the documented JSON action names and fields when editing it. Host-side tool validation, citation checks and context limits remain enforced.
 
-`metadata.system` is a draft for the planned extraction workflow; it is not currently used. Add other uniquely named sections as needed. A future task can select them through `load_prompt(name, path)`; adding a section alone does not activate a feature.
+`metadata.system` is used by the separate [metadata extraction demo](METADATA_DEMO_README.md); desktop enrichment remains planned. Add other uniquely named sections as needed. A future task can select them through `load_prompt(name, path)`; adding a section alone does not activate a feature.
 
 The app uses the bundled file by default. Select another file under **Sources & model → Prompt library**, or add `"prompts_file": "my-prompts.txt"` at the top level of your JSON configuration. Custom relative paths resolve against the configuration directory; blank/unset uses the bundled file, independently of the working directory. CLI and GUI use the same selection. **Load & test GGUF** retains its fixed READY probe.
 
@@ -307,3 +307,7 @@ Model loading is local-files-only with remote code disabled. Missing models/depe
 For complete lexical enumeration, the model can set `search_scope:"exhaustive"`; `sort:"newest"` also bypasses reranking. Shortlist responses identify `match_scope:"candidate_pool"`, its size and whether more lexical results exist outside it. Paging is frozen within a question's database snapshot. Expired pools require restarting at offset zero; they are not silently rescored halfway through pagination.
 
 The timing breakdown separates **FTS searches** from **Reranking / shortlist work**. The local question trace records candidate IDs, ranked IDs, relevance question, device, scores, pair-token counts, fallback reasons and cold/warm load/scoring time. Compare identical questions and sources with the toggle off/on before treating it as an improvement. Neither an answered question nor a higher score proves better answer quality.
+
+## Standalone metadata extraction demo
+
+Use [demo_metadata_extraction.py](demo_metadata_extraction.py) to extract reviewable metadata from any number of source row IDs in your own local text file. It reads the library without modifying it and creates an HTML/JSON report with evidence, exact evaluated excerpts, filenames, paths and original-source links. See the [demo setup and prompt guide](METADATA_DEMO_README.md) before running. Source-ID lists, documents and generated reports are not included in this repository.
