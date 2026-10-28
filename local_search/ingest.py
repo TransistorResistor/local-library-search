@@ -266,16 +266,42 @@ def clipper_connection(path,closed_snapshot=False,scratch=None,network_mode=None
 
 def discover_clipper(library,config,inventory,on_progress=None,cancel_event=None):
     path=Path(config['path']).expanduser().resolve()
-    with clipper_connection(path,config.get('closed_snapshot',False),library.path.parent,config.get('network_mode'),cancel_event) as source:
-        source.row_factory=sqlite3.Row
-        columns={r[1] for r in source.execute('PRAGMA table_info(clips)')}
-        if not {'id','title','captured_at'}<=columns or not {'content_text','content_html'}&columns:
-            raise ValueError('Unsupported clipper schema; expected clips(id,title,captured_at,content_text/content_html)')
-        wanted=['id','title','captured_at','url','canonical_url','content_text','content_html','date_published_norm','date_precision']
-        selection=','.join('"'+c+'"' if c in columns else 'NULL AS "'+c+'"' for c in wanted)
-        for row in source.execute('SELECT '+selection+' FROM clips ORDER BY id'):
-            check_cancel(cancel_event);inventory.add(dict(row))
-            if on_progress:on_progress(path,inventory.count)
+    stage='opening source';columns=None
+    try:
+        with clipper_connection(path,config.get('closed_snapshot',False),library.path.parent,config.get('network_mode'),cancel_event) as source:
+            source.row_factory=sqlite3.Row;stage='reading clips schema'
+            columns={r[1] for r in source.execute('PRAGMA table_info(clips)')}
+            if not {'id','title','captured_at'}<=columns or not {'content_text','content_html'}&columns:
+                raise ValueError('Unsupported clipper schema; expected clips(id,title,captured_at,content_text/content_html)')
+            wanted=['id','title','captured_at','url','canonical_url','content_text','content_html','date_published_norm','date_precision']
+            selection=','.join('"'+c+'"' if c in columns else 'NULL AS "'+c+'"' for c in wanted)
+            stage='reading clip rows'
+            for row in source.execute('SELECT '+selection+' FROM clips ORDER BY id'):
+                check_cancel(cancel_event);inventory.add(dict(row))
+                if on_progress:on_progress(path,inventory.count)
+    except RefreshCancelled:raise
+    except Exception as error:
+        remote=network_path(path);mode=config.get('network_mode') or ('closed_snapshot' if config.get('closed_snapshot') else 'read_only_live')
+        sidecars={}
+        for suffix in ('-wal','-shm','-journal'):
+            try:sidecars[suffix]=Path(str(path)+suffix).exists()
+            except OSError:sidecars[suffix]='unavailable'
+        diagnostics={'stage':stage,'source_path':str(path),'network_path':remote,'access_mode':mode,
+                     'sidecars':sidecars,'rows_discovered':inventory.count,'error_type':type(error).__name__,
+                     'sqlite_errorcode':getattr(error,'sqlite_errorcode',None),'sqlite_errorname':getattr(error,'sqlite_errorname',None)}
+        if columns is not None:diagnostics['clip_columns']=sorted(columns)
+        if remote:
+            hint='For network sources, use a completed export or close/checkpoint the producer before choosing Closed snapshot. Live remote WAL is unsupported.'
+        elif mode!='read_only_live':
+            hint='For a live local clipper, disable Closed snapshot. For a closed snapshot, close/checkpoint the producer first; do not delete WAL files.'
+        else:
+            hint='Check the source path and permissions, including WAL/shared-memory access. Live local clippers should have Closed snapshot disabled.'
+        if columns is not None and (not {'id','title','captured_at'}<=columns or not {'content_text','content_html'}&columns):
+            hint='Choose the clipper database containing the supported clips table; the discovered column names are included below.'
+        diagnostics['hint']=hint
+        failure=ValueError('Clipper discovery failed: '+str(error)+'; diagnostics='+json.dumps(diagnostics,ensure_ascii=False,sort_keys=True))
+        failure.diagnostics=diagnostics
+        raise failure from error
     # Remote transaction is closed before any PDF extraction or index processing.
 
 
@@ -347,7 +373,8 @@ def refresh(library,config,on_progress=None,cancel_event=None):
                 except RefreshCancelled:raise
                 except Exception as error:
                     log.failure(source['name'],source['path'],error)
-                    reports.append({'collection':source['name'],'error':str(error),'retained_existing_index':True,'log_file':str(log.path)})
+                    reports.append({'collection':source['name'],'error':str(error),'retained_existing_index':True,'log_file':str(log.path),
+                                    **({'diagnostics':error.diagnostics} if hasattr(error,'diagnostics') else {})})
                     emit('Source failed',source['path'],index)
             total=sum(m.count for _,_,m in manifests)
             frozen_total=total

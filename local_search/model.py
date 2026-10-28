@@ -33,7 +33,7 @@ class DLLDirectories:
 class GGUF:
     def __init__(self,path,context=12000,output=2000,gpu_layers=0,torch_lib=None,thinking=False,threads=None,
                  cache_k='f16',cache_v='f16',flash_attention=False,kv_offload=True):
-        path=Path(path).expanduser().resolve()
+        load_started=time.perf_counter();path=Path(path).expanduser().resolve()
         if path.suffix.lower()!='.gguf' or not path.is_file():raise ValueError('Select an existing GGUF file')
         if context<1024 or output<64 or output>=context:raise ValueError('Invalid context/output limits')
         validate_cache(cache_k,cache_v,flash_attention)
@@ -47,18 +47,34 @@ class GGUF:
                 raise ValueError('Installed llama-cpp-python is CPU-only. PyTorch DLLs cannot add a CUDA backend; install a compatible CUDA build or use gpu_layers=0.')
             kwargs={'n_threads':threads} if threads else {}
             types={name:getattr(llama_cpp,'GGML_TYPE_'+name.upper()) for name in ('f16','q8_0','q4_0')}
-            self.llm=Llama(model_path=str(path),n_ctx=context,n_gpu_layers=gpu_layers,verbose=False,
-                type_k=types[cache_k],type_v=types[cache_v],flash_attn=flash_attention,offload_kqv=kv_offload,**kwargs)
+            from .diagnostics import load_observations,offloaded_layers
+            with load_observations(llama_cpp) as observations:
+                self.llm=Llama(model_path=str(path),n_ctx=context,n_gpu_layers=gpu_layers,verbose=False,
+                    type_k=types[cache_k],type_v=types[cache_v],flash_attn=flash_attention,offload_kqv=kv_offload,**kwargs)
             template=self.llm.metadata.get('tokenizer.chat_template')
             if not template:raise ValueError('GGUF is missing tokenizer.chat_template; use an instruction model with embedded chat template')
             self.formatter=Jinja2ChatFormatter(template=template,
                 eos_token=self.llm.detokenize([self.llm.token_eos()],special=True).decode('utf-8'),
                 bos_token=self.llm.detokenize([self.llm.token_bos()],special=True).decode('utf-8'))
+            self.model_diagnostics={'model_file':path.name,'model_bytes':path.stat().st_size,'runtime':getattr(llama_cpp,'__version__','unknown'),
+                'gpu_offload_supported':bool(llama_supports_gpu_offload()),'requested_gpu_layers':gpu_layers,
+                'actual_gpu_layers':0 if gpu_layers==0 else None,
+                'offload_verification':'CPU layers explicitly requested' if gpu_layers==0 else 'Runtime does not expose verified layer placement through this wrapper',
+                'context_tokens':context,'output_tokens':output,'cache_k':cache_k,'cache_v':cache_v,
+                'kv_offload_requested':kv_offload,'flash_attention_requested':flash_attention,'thinking':thinking,
+                'mmap_requested':True,'load_seconds':time.perf_counter()-load_started}
+            self.model_diagnostics['runtime_observations']=observations
+            verified=offloaded_layers(observations)
+            if verified:self.model_diagnostics.update(verified,offload_verification='Observed runtime offloaded-layer log')
         except Exception:
             if hasattr(self,'llm'):self.llm.close()
             self.dlls.close();raise
 
     def close(self):self.llm.close();self.dlls.close()
+
+    def diagnostics(self):
+        return dict(getattr(self,'model_diagnostics',{}),last_generation=getattr(self,'last_timing',None),
+                    memory_note='System RAM and dedicated VRAM are separate. Shared GPU memory uses system RAM; throughput alone does not verify layer placement.')
 
     def tokens(self,messages):
         rendered=self.formatter(messages=messages,enable_thinking=self.thinking)
@@ -67,7 +83,10 @@ class GGUF:
 
     def count(self,messages):return len(self.tokens(messages)[0])
 
-    def complete(self,messages,on_event=None):
+    def complete_json(self,messages,schema,on_event=None):
+        return self.complete(messages,on_event=on_event,json_schema=schema)
+
+    def complete(self,messages,on_event=None,json_schema=None):
         started=time.perf_counter()
         tokens,rendered=self.tokens(messages)
         if len(tokens)+self.output>self.context:raise ValueError('Prompt plus output reserve exceeds the configured context cap')
@@ -76,6 +95,10 @@ class GGUF:
             from llama_cpp import StoppingCriteriaList
             criteria=StoppingCriteriaList(list(criteria or [])+[lambda tokens,logits:self.cancel_event.is_set()])
         options=dict(prompt=tokens,max_tokens=self.output,temperature=0,stop=rendered.stop,stopping_criteria=criteria)
+        constrained=False
+        if json_schema is not None and not self.thinking:
+            from llama_cpp import LlamaGrammar
+            options['grammar']=LlamaGrammar.from_json_schema(json.dumps(json_schema),verbose=False);constrained=True
         runtime_started=time.perf_counter()
         if on_event is None:
             response=self.llm.create_completion(**options)
@@ -103,6 +126,9 @@ class GGUF:
         timing['total_seconds']=time.perf_counter()-started
         timing['postprocessing_seconds']=max(0,timing['total_seconds']-timing['preparation_seconds']-timing['inference_seconds'])
         response['reserved_total']=len(tokens)+self.output
+        if json_schema is not None:response['json_schema_constrained']=constrained
+        self.last_timing=dict(timing)
+        if on_event:on_event({'type':'stream_end'})
         return response
 
 

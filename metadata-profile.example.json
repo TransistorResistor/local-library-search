@@ -1,0 +1,16 @@
+{
+  "name": "document-metadata",
+  "instructions": "Extract metadata about this document, not cited works. Distinguish publication dates, information cutoffs and reporting periods. Preserve unknowns. Never use filenames or capture timestamps as proof of publication. Keep publisher wording unless the document establishes its expansion.",
+  "max_attempts": 3,
+  "max_chars": 24000,
+  "max_input_tokens": 8000,
+  "time_limit_seconds": 180,
+  "fields": [
+    {"name": "publisher", "type": "string", "prompt": "The issuing organisation, supported by an imprint or statement of responsibility.", "evidence": true, "auto_accept": false},
+    {"name": "publication_date", "type": "date", "prompt": "Publication date of this document. Use only the supported year/month/day precision.", "evidence": true, "auto_accept": false},
+    {"name": "information_cutoffs", "type": "date_list", "prompt": "Explicit data cutoffs or as-of dates. Give the scope of each; do not infer a whole-document cutoff from a topic-specific one.", "evidence": true, "auto_accept": false},
+    {"name": "reporting_periods", "type": "interval_list", "prompt": "Reporting periods with nullable start/end date objects and explicit scope.", "evidence": true, "auto_accept": false},
+    {"name": "reference_numbers", "type": "string_list", "prompt": "This document's report number, DOI or ISBN; retain exact identifier wording.", "evidence": true, "auto_accept": false},
+    {"name": "keywords", "type": "string_list", "prompt": "Up to eight concise topic suggestions. Do not treat suggestions as source facts.", "generated": true, "evidence": false, "max_items": 8, "auto_accept": false}
+  ]
+}

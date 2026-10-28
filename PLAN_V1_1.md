@@ -148,6 +148,8 @@ Compare disk/cache/mapped variants on identical queries, both cold and warm, wit
 
 ## 5. Optional metadata enrichment for selected folders
 
+Scope update: plan v1.2 now prioritises a separately executed metadata sidecar, user-defined field schemas and an additive migration for existing libraries. Its bounded JSON recovery and throughput pilot supersede the earlier assumption of building the extraction loop into the desktop metadata panel. A future desktop launcher/status view remains possible.
+
 ### Reason
 
 Better bibliographic and temporal metadata would help users find relevant reports, distinguish publication from arrival, and assess whether information is current. Model processing is far slower and less certain than lexical ingestion. Therefore it must be a separate, opt-in, resumable process, not an ingestion prerequisite.

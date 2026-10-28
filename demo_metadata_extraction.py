@@ -180,7 +180,8 @@ def write_report(directory,run):
     parts=['<!doctype html><meta charset="utf-8"><title>Metadata extraction review</title>',
            '<style>body{max-width:1100px;margin:32px auto;font:16px system-ui}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f3f3;padding:16px}article{border-top:2px solid #aaa;margin-top:32px}a{color:#145da0}</style>',
            '<h1>Metadata extraction review</h1><p>Source IDs: '+esc(run['source_ids'])+'</p>',
-           '<p>Read-only trial. Fields are suggestions, not saved to the library. Evidence matching checks literal text, not whether a field is semantically correct.</p>',
+           ('<p>Read-only trial. Fields are suggestions, not saved to the library. ' if run.get('dry_run',True) else '<p>Metadata write run. See committed fields and review status; manual overrides are preserved. ')+
+           'Evidence matching checks literal text, not whether a field is semantically correct.</p>',
            '<details><summary>Exact extraction prompts</summary><pre>'+esc(run['system_prompt'])+'\n\n'+esc(TASK)+'</pre></details>']
     for result in run['results']:
         source=result['source'];ident=source['source_id'];filename=Path(source['locator']).name
@@ -190,6 +191,8 @@ def write_report(directory,run):
         parts+=['<p>Status: '+esc(result['status'])+'; evaluated '+esc(result.get('evaluated_chars',0))+' / '+esc(source['total_chars'])+' indexed characters. '+('FULL indexed text.' if result.get('full_indexed_text') else 'PARTIAL text; middle content may be omitted.')+'</p>',
                 '<p>Document hash: '+esc(source['text_hash'])+'</p><pre>'+esc(json.dumps(result.get('metadata',{'error':result.get('error')}),ensure_ascii=False,indent=2))+'</pre>',
                 '<p>Validation issues: '+esc(result.get('validation_issues',[]))+'</p>']
+        if 'committed_fields' in result:parts+=['<p>Committed fields: '+esc(result['committed_fields'])+'; preserved manual fields: '+esc(result.get('preserved_manual_fields',[]))+'</p>']
+        if result.get('attempts'):parts+=['<details><summary>JSON recovery attempts and exact requests</summary><pre>'+esc(json.dumps(result['attempts'],ensure_ascii=False,indent=2))+'</pre></details>']
         for excerpt in result.get('excerpts',[]):
             name=f'source-{ident}-{excerpt["excerpt_id"]}.txt';(directory/name).write_text(excerpt['text'],'utf-8')
             parts+=['<details><summary>Exact evaluated text '+esc(excerpt['excerpt_id'])+' — chars '+esc(excerpt['start_char'])+'–'+esc(excerpt['end_char'])+', pages '+esc(excerpt['pages'])+'</summary><p><a href="'+esc(name)+'">Open plain text</a></p><pre>'+esc(excerpt['text'])+'</pre></details>']

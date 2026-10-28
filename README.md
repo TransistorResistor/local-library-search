@@ -2,6 +2,10 @@
 
 Roadmap: [plan v1.2 — counted progress, UNC access and search completion](PLAN_V1_2.md). Previous scope: [v1.1](PLAN_V1_1.md).
 
+New controls: [between-turn steering, manual reranking, diagnostics, Chrome/Acrobat and managed libraries](LOCAL_SEARCH_NEW_CONTROLS.md).
+
+Metadata sidecar: [custom fields/prompts, random dry runs, migration, reviewed writes and JSON recovery](METADATA_WORKFLOW.md). Start with a dry run before applying metadata to a working library.
+
 This native desktop program indexes a webclipper SQLite database and PDF files anywhere beneath configured folders. It keeps its own SQLite FTS5 library. You can search directly without a model, or load a GGUF inside the program and ask questions in ordinary language. Sources and inference stay local; no OpenRouter call is made by the desktop program. A command-line interface is also available.
 
 
@@ -62,7 +66,9 @@ Rejected actions are explicit in the question trace: each attempted tool entry h
 
 Refreshing the index shows the active source, current filename, phase, elapsed time and processed/indexed/cached/extracted/skipped/error counts. Phases include database opening, folder discovery, hashing, PDF extraction, indexing and deletion reconciliation. The status remains visible while extraction is running; a long PDF may take up to the existing 90-second worker timeout. A single progress bar is shown on Search, and manual refresh switches to that tab.
 
-Folder traversal remains one pass: the final PDF count is unknown until traversal finishes, so its bar is indeterminate and the processed count increases as files are found. No speculative percentage or ETA is shown. Webclipper imports have an exact row total and a determinate bar; intermediate clip counts are provisional until the existing transaction commits. Counts are per source, with source number/total shown. Cached/extracted are processing-path counts and overlap indexed/skipped outcomes; do not add them together as separate files.
+Discovery walks each configured folder recursively once, collecting files with a case-insensitive `.pdf` extension. It skips symbolic-link files and does not descend into symbolic-link directories or Windows junctions. Discovery does not read PDF contents or apply size/text-quality checks. Clipper discovery reads every row of the supported `clips` table in ID order into a frozen inventory and releases the source transaction before indexing.
+
+The candidate count is unknown during discovery. Once all available sources have been inventoried, refresh freezes one total and processes that inventory with a determinate progress bar. New arrivals wait until the next refresh. File size, hashing, cached extraction and text-quality checks happen during processing; candidates can therefore be counted but later skipped or fail. Incomplete folder traversal prevents deletion reconciliation. Clipper counts are provisional until its collection transaction commits. Cached/extracted are processing-path counts and overlap indexed/skipped outcomes; do not add them together as separate files.
 
 Failures are printed immediately to **stderr** when a terminal exists. The CLI also prints throttled progress to stderr, keeping its final stdout report as JSON. Console-free `pythonw` launches retain failures in **`ingestion.log` beside the library database**, with two rotated backups (`.1`, `.2`), each capped at approximately 5 MiB. The log includes paths and reasons for source/file errors, scan failures, skipped files and partially accepted PDFs. These are local operational records and can contain private filenames. The GUI completion summary shows counts and the log path.
 
@@ -267,6 +273,7 @@ When one GPU drives both the desktop and inference, leave headroom by reducing G
 
 - **Missing PDF library:** install `requirements-local-search.txt` with the same Python that runs the program.
 - **Unable to open clipper database:** verify the main path; for a closed database on read-only media use the explicit closed-snapshot mode above. Do not delete WAL files.
+- **Clipper discovery diagnostics:** the refresh report and `ingestion.log` include the failing stage, resolved source path, local/network classification, access mode, WAL/SHM/journal presence, rows discovered and available SQLite error details. Schema failures also list discovered clip columns. Hints distinguish local live access from closed snapshots and network exports; clip titles and bodies are not included in these diagnostics.
 - **No PDF results:** inspect `catalog --status skipped` and `catalog --status error`; the file may be a scan, encrypted, malformed, or rejected by text-quality checks.
 - **No search matches:** broaden the query, quote punctuation, try fewer AND terms, and use title search. Zero hits do not prove absence.
 - **DLL/model architecture errors:** verify 64-bit Python, runtime/model compatibility and CUDA versions; test CPU mode first.

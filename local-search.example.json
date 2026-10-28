@@ -47,5 +47,7 @@
     "note_tokens": 6000,
     "effort": "legacy"
   },
-  "search_input_mode": "simple"
+  "search_input_mode": "simple",
+  "library_sync": {"enabled": false, "auto_sync": false},
+  "pdf_viewer": {"enabled": false, "viewer": "acrobat", "executable": ""}
 }

@@ -21,6 +21,11 @@ def configuration(path):
         if source.get('ascii_ratio',.8)<0 or source.get('ascii_ratio',.8)>1:raise ValueError('ascii_ratio must be 0..1')
     if len(set(names))!=len(names):raise ValueError('Source names must be unique and stable')
     data['database']=str((path.parent/Path(data.get('database','data/library.sqlite3'))).resolve())
+    for key in ('enabled','auto_sync'):
+        if type(data.get('library_sync',{}).get(key,False)) is not bool:raise ValueError('library_sync '+key+' must be true or false')
+    viewer=data.get('pdf_viewer',{})
+    if viewer.get('viewer','acrobat') not in ('chrome','acrobat'):raise ValueError('PDF viewer must be chrome or acrobat')
+    if type(viewer.get('enabled',False)) is not bool:raise ValueError('pdf_viewer enabled must be true or false')
     if data.get('prompts_file'):
         data['prompts_file']=str((path.parent/Path(data['prompts_file']).expanduser()).resolve())
     for source in data['sources']:
@@ -49,14 +54,21 @@ def main():
     search=sub.add_parser('search');search.add_argument('query');search.add_argument('--limit',type=int,default=5);search.add_argument('--offset',type=int,default=0)
     search.add_argument('--after');search.add_argument('--before');search.add_argument('--date-field',choices=('added_at','modified_at','published_at'),default='added_at');search.add_argument('--sort',choices=('relevance','newest'),default='relevance');search.add_argument('--collection');search.add_argument('--no-count',action='store_true',help='Skip the exact total; retain pagination')
     search.add_argument('--input-mode',choices=('simple','advanced'),default='advanced',help='Simple quotes literal words/phrases; advanced preserves raw FTS5 (CLI default)')
+    search.add_argument('--relevance-question',help='Rerank FTS candidates against this question (requires enabled reranker)')
     doc=sub.add_parser('document');doc.add_argument('doc_id',type=int);doc.add_argument('--start-char',type=int,default=0);doc.add_argument('--count-chars',type=int,default=4000)
     context=sub.add_parser('context');context.add_argument('passage_id',type=int);context.add_argument('--doc-id',type=int);context.add_argument('--radius-chars',type=int,default=1000)
     ask=sub.add_parser('ask');ask.add_argument('question');ask.add_argument('--trace',type=Path);ask.add_argument('--max-rounds',type=int,help='Override response budget, including finalisation')
     ask.add_argument('--effort',choices=('legacy','quick','balanced','thorough'),help='Override configured effort (6/12/24 responses; legacy retains previous policy)')
     ask.add_argument('--note-tokens',type=int,help='Notebook token limit (64..32768); overrides agent_options.note_tokens, default 6000')
     sub.add_parser('model-check')
+    sub.add_parser('library-status');sub.add_parser('library-sync')
+    adopt=sub.add_parser('library-adopt');adopt.add_argument('--preserve-local',action='store_true',help='Preserve pending local work in a recovery backup, then adopt the published version')
     sub.add_parser('gui')
+    metadata=sub.add_parser('metadata',add_help=False);metadata.add_argument('metadata_args',nargs=argparse.REMAINDER)
     args=p.parse_args()
+    if args.command=='metadata':
+        from .metadata import main as metadata_main
+        metadata_main(['--config',args.config]+args.metadata_args);return
     if args.command=='gui':
         from .gui import launch
         launch(args.config);return
@@ -65,27 +77,52 @@ def main():
     if args.command=='ingest':
         from .progress import terminal
         terminal('Opening ingestion library: '+config['database'])
-    with Library(config['database'],**config.get('database_options',{})) as library:
+    from .library_management import configured_library
+    with configured_library(config) as library:
         if args.command=='ingest':
             from .progress import TerminalProgress
             while True:
                 result=refresh(library,config,on_progress=TerminalProgress());print(json.dumps(result,ensure_ascii=False,indent=2),flush=True)
+                if library.management and config.get('library_sync',{}).get('auto_sync',False):
+                    try:library.management.sync()
+                    except Exception as error:terminal('Library sync pending: '+str(error))
                 if not args.watch:
                     if any('error' in r or r.get('errors') or r.get('scan_errors') for r in result):raise SystemExit(1)
                     return
                 time.sleep(args.watch)
+        elif args.command in ('library-status','library-sync','library-adopt'):
+            if not library.management:raise ValueError('Enable library_sync or configure a network library path first')
+            if args.command=='library-adopt':
+                library.close();result=library.management.adopt_published(preserve_pending=args.preserve_local)
+            else:result=library.management.sync() if args.command=='library-sync' else library.management.status()
         elif args.command=='status':result=library.status()
         elif args.command=='catalog':result=library.catalog(args.offset,args.limit,args.status,args.title_query,args.input_mode)
-        elif args.command=='search':result=library.search(args.query,args.limit,args.offset,args.date_field,args.after,args.before,args.collection,args.sort,exact_count=not args.no_count,input_mode=args.input_mode)
+        elif args.command=='search':
+            if args.relevance_question:
+                from .rerank import RerankConfig,Reranker,QuestionSearch
+                options=RerankConfig(**config.get('reranker',{}))
+                if not options.enabled:raise ValueError('Enable the reranker before using --relevance-question')
+                ranker=Reranker(options)
+                try:
+                    searcher=QuestionSearch(library,ranker,args.relevance_question)
+                    arguments=dict(query=args.query,limit=args.limit,date_field=args.date_field,after=args.after,before=args.before,collection=args.collection,sort=args.sort,exact_count=not args.no_count,input_mode=args.input_mode)
+                    if args.offset:searcher.search(**arguments,offset=0)
+                    result=searcher.search(**arguments,offset=args.offset);result['reranking_trace']=searcher.trace
+                finally:ranker.close()
+            else:result=library.search(args.query,args.limit,args.offset,args.date_field,args.after,args.before,args.collection,args.sort,exact_count=not args.no_count,input_mode=args.input_mode)
         elif args.command=='document':result=library.read(args.doc_id,args.start_char,args.count_chars)
         elif args.command=='context':result=library.context(args.passage_id,args.doc_id,args.radius_chars)
         else:
             from .model import GGUF
-            model=GGUF(**config['model'])
+            from .inference_lock import InferenceLease
+            lease=InferenceLease()
+            try:model=GGUF(**config['model'])
+            except BaseException:lease.close();raise
             try:
                 if args.command=='model-check':
                     result=model.complete([{'role':'user','content':'Reply with the single word READY.'}])
                     result['dll_directories']=model.dlls.paths
+                    result['diagnostics']=model.diagnostics()
                 else:
                     from .agent import ask as ask_library
                     from .rerank import RerankConfig,Reranker
@@ -98,7 +135,9 @@ def main():
                     if args.trace:
                         args.trace.parent.mkdir(parents=True,exist_ok=True);args.trace.write_text(json.dumps(result,ensure_ascii=False,indent=2),'utf-8')
                     result={k:v for k,v in result.items() if k not in ('trace','context_checks')}
-            finally:model.close()
+            finally:
+                try:model.close()
+                finally:lease.close()
         print(json.dumps(result,ensure_ascii=False,indent=2))
 
 

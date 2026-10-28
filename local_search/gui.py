@@ -18,7 +18,7 @@ from .timing import complete_timing,format_timing
 from .progress import format_progress
 
 
-def open_source(source):
+def open_source(source,options=None):
     """Only destinations from the library registry, never a generated shell command."""
     locator=source['locator'];scheme=urlsplit(locator).scheme.lower()
     if scheme in ('http','https'):
@@ -27,6 +27,11 @@ def open_source(source):
     path=Path(locator)
     if not path.is_absolute() or path.suffix.lower()!='.pdf':raise ValueError('Source has no supported PDF or HTTP(S) destination')
     if not path.is_file():raise ValueError('Source file has moved or is unavailable: '+str(path))
+    if options:
+        from .pdf_viewer import open_page
+        reason=open_page(path,source.get('page'),options)
+        if reason is None:return {'opened_at_page':source['page']}
+        os.startfile(str(path));return {'fallback':reason}
     os.startfile(str(path))
 
 
@@ -35,6 +40,11 @@ class App:
         self.root=root;self.path=Path(config_path).resolve();self.busy=False;self.closing=False
         self.jobs=queue.Queue();self.results=queue.Queue();self.cancel=threading.Event();self.model=None;self.model_key=None
         self.reranker=None;self.reranker_key=None
+        self.manager=None;self.management_key=None;self.manual_searcher=None;self.active_steering=None
+        self.model_lease=None
+        self.next_sync_check=time.monotonic()+15
+        from .display_stream import DisplayStream
+        self.display_stream=DisplayStream()
         self.events=queue.Queue(maxsize=256);self.library=None;self.library_key=None;self.tooltip=None
         self.trace_lock=threading.Lock();self.question_serial=0
         self.ingest_lock=threading.Lock();self.ingest_latest=None;self.ingesting=False
@@ -75,7 +85,7 @@ class App:
             widget=ttk.Button(parent,text='Browse…',command=lambda:self.choose(key,browse));widget.grid(row=row,column=2);self.controls.append(widget)
 
     def choose(self,key,kind):
-        value=filedialog.askdirectory(parent=self.root) if kind=='dir' else filedialog.asksaveasfilename(parent=self.root,defaultextension='.sqlite3') if kind=='save' else filedialog.askopenfilename(parent=self.root,filetypes=[('Prompt library','*.txt'),('All files','*')] if kind=='prompts' else [('GGUF model','*.gguf'),('All files','*')])
+        value=filedialog.askdirectory(parent=self.root) if kind=='dir' else filedialog.asksaveasfilename(parent=self.root,defaultextension='.sqlite3') if kind=='save' else filedialog.askopenfilename(parent=self.root,filetypes=[('Prompt library','*.txt'),('All files','*')] if kind=='prompts' else [('Executable','*.exe'),('All files','*')] if kind=='exe' else [('GGUF model','*.gguf'),('All files','*')])
         if value:self.vars[key].set(value)
 
     def build_setup(self):
@@ -88,10 +98,26 @@ class App:
         box=ttk.Frame(library_page);box.pack(fill='x',pady=4);box.columnconfigure(1,weight=1)
         self.entry(box,0,'Library database','database',self.raw.get('database','data/library.sqlite3'),'save')
         self.entry(box,1,'Auto-refresh seconds (0 = manual)','refresh_seconds',self.raw.get('refresh_seconds',0))
+        sync=self.raw.get('library_sync',{})
+        self.vars['managed_library']=tk.BooleanVar(value=sync.get('enabled',False))
+        self.vars['auto_sync']=tk.BooleanVar(value=sync.get('auto_sync',False))
+        ttk.Checkbutton(box,text='Use AppData working copy; database above is the published copy',variable=self.vars['managed_library']).grid(row=2,column=0,columnspan=3,sticky='w')
+        ttk.Checkbutton(box,text='Automatically sync changes back (single user)',variable=self.vars['auto_sync']).grid(row=3,column=0,columnspan=3,sticky='w')
+        sync_actions=ttk.Frame(library_page);sync_actions.pack(fill='x')
+        self.button(sync_actions,'Library / sync status',self.sync_status,side='left')
+        self.button(sync_actions,'Sync now',self.sync_now,side='left',padx=5)
+        self.button(sync_actions,'Load published copy',self.load_published,side='left',padx=5)
+        ttk.Label(library_page,text='Network libraries use a local AppData copy. Existing remote libraries must be closed exports. Conflicting changes are retained for review.',wraplength=760).pack(anchor='w',pady=4)
         prefs=ttk.Frame(preferences);prefs.pack(fill='x');prefs.columnconfigure(1,weight=1)
         self.entry(prefs,0,'Notebook token limit (64–32768)','note_tokens',self.raw.get('agent_options',{}).get('note_tokens',6000))
         self.entry(prefs,1,'Prompt library (blank = bundled prompts.txt)','prompts_file',self.raw.get('prompts_file',''),'prompts')
         self.entry(prefs,2,'Database cache MiB (1–1024, per connection)','cache_mb',self.raw.get('database_options',{}).get('cache_mb',32))
+        viewer=self.raw.get('pdf_viewer',{})
+        self.vars['pdf_page_enabled']=tk.BooleanVar(value=viewer.get('enabled',False))
+        self.vars['pdf_viewer']=tk.StringVar(value=viewer.get('viewer','acrobat'))
+        ttk.Checkbutton(prefs,text='Open PDFs at known cited page',variable=self.vars['pdf_page_enabled']).grid(row=3,column=0,sticky='w')
+        ttk.Combobox(prefs,textvariable=self.vars['pdf_viewer'],values=('acrobat','chrome'),state='readonly').grid(row=3,column=1,sticky='ew',padx=8)
+        self.entry(prefs,4,'Viewer executable (blank = auto-detect)','pdf_executable',viewer.get('executable',''),'exe')
         ttk.Label(preferences,text='Notebook space is part of the model context. Prompt edits apply on the next question.',wraplength=760).pack(anchor='w',pady=12)
         ttk.Label(preferences,text=f'Settings file: {self.path}',wraplength=760).pack(anchor='w')
         source_box=ttk.Frame(library_page);source_box.pack(fill='both',expand=True,pady=8)
@@ -123,7 +149,7 @@ class App:
         for label,key,default in [('Flash Attention','flash_attention',False),('KV offload','kv_offload',True),('Thinking','thinking',False)]:
             self.vars[key]=tk.BooleanVar(value=cfg.get(key,default));ttk.Checkbutton(cache,text=label,variable=self.vars[key]).pack(side='left',padx=5)
         ttk.Label(model,text='F16 uses more cache memory; Q8/Q4 use less. Quantized V requires Flash Attention. Leave GPU headroom for your display; use fewer GPU layers or a smaller context.',wraplength=720).grid(row=6,column=0,columnspan=3,sticky='w',pady=5)
-        rank=ttk.LabelFrame(rank_page,text='Optional reranker — model searches only',padding=8);rank.pack(fill='x',pady=8);rank.columnconfigure(1,weight=1)
+        rank=ttk.LabelFrame(rank_page,text='Optional reranker',padding=8);rank.pack(fill='x',pady=8);rank.columnconfigure(1,weight=1)
         cfg=self.raw.get('reranker',{})
         self.vars['rerank_enabled']=tk.BooleanVar(value=cfg.get('enabled',False))
         ttk.Checkbutton(rank,text='Enable reranking',variable=self.vars['rerank_enabled']).grid(row=0,column=0,sticky='w')
@@ -135,7 +161,7 @@ class App:
                                       (6,'Pair token budget','max_pair_tokens',512),(7,'Scoring timeout seconds','timeout_seconds',5),
                                       (8,'Startup timeout seconds','startup_seconds',60)]:
             self.entry(rank,row,label,'rerank_'+key,cfg.get(key,default))
-        ttk.Label(rank,text='Ranks FTS passages against your question. CPU is default; CUDA requires GPU-enabled PyTorch and shares VRAM with the GGUF and display. Larger pools cost more time. Direct FTS searches are unchanged.',wraplength=720).grid(row=9,column=0,columnspan=3,sticky='w',pady=5)
+        ttk.Label(rank,text='Ranks FTS passages against your question. Manual searches use it when a Rank results for question is entered. Newest-first bypasses scoring. CUDA shares VRAM with the GGUF and display.',wraplength=720).grid(row=9,column=0,columnspan=3,sticky='w',pady=5)
         actions=self.setup_actions
         self.button(actions,'Save settings',self.save,side='left')
         self.button(actions,'Refresh index',self.ingest,side='left',padx=5)
@@ -144,6 +170,7 @@ class App:
         model_actions=ttk.Frame(model_page);model_actions.pack(fill='x',pady=8)
         self.button(model_actions,'Load & test model',self.model_check,side='left')
         self.button(model_actions,'Unload model',lambda:self.submit(self.unload),side='left',padx=6)
+        self.button(model_actions,'Model diagnostics',self.model_diagnostics,side='left',padx=6)
         self.button(rank_page,'Unload / reset reranker',lambda:self.submit(self.unload_reranker),side='left',padx=5)
 
     def draw_sources(self):
@@ -185,6 +212,8 @@ class App:
             if not 64<=note_tokens<=32768:raise ValueError('Notebook budget must be 64..32768 tokens.')
             data['agent_options']={**self.raw.get('agent_options',{}),'note_tokens':note_tokens,'effort':self.effort.get()}
             data['search_input_mode']=self.search_input_mode.get()
+            data['library_sync']={**data.get('library_sync',{}),'enabled':self.vars['managed_library'].get(),'auto_sync':self.vars['auto_sync'].get()}
+            data['pdf_viewer']={'enabled':self.vars['pdf_page_enabled'].get(),'viewer':self.vars['pdf_viewer'].get(),'executable':self.vars['pdf_executable'].get().strip()}
             from .rerank import RerankConfig
             from dataclasses import asdict
             rank={'enabled':self.vars['rerank_enabled'].get(),'device':self.vars['rerank_device'].get(),'model_dir':self.vars['rerank_model_dir'].get().strip()}
@@ -233,6 +262,14 @@ class App:
         self.question_entry.grid(row=0,column=0,sticky='ew',ipady=4)
         self.question_entry.bind('<Return>',lambda event:self.search() if not self.busy else None)
         self.question_entry.bind('<Control-Return>',lambda event:self.question_model() if not self.busy else None)
+        self.relevance_question=tk.StringVar()
+        ttk.Label(query,text='Rank search results for question (optional)').grid(row=3,column=0,sticky='w',pady=(8,0))
+        ttk.Entry(query,textvariable=self.relevance_question).grid(row=4,column=0,sticky='ew')
+        steer_row=ttk.Frame(query);steer_row.grid(row=5,column=0,sticky='ew',pady=(6,0));steer_row.columnconfigure(0,weight=1)
+        self.steering_text=tk.StringVar();self.steering_status=tk.StringVar(value='Steering applies on the next model turn.')
+        ttk.Entry(steer_row,textvariable=self.steering_text).grid(row=0,column=0,sticky='ew')
+        ttk.Button(steer_row,text='Queue instruction',command=self.queue_steering).grid(row=0,column=1,padx=6)
+        ttk.Label(steer_row,textvariable=self.steering_status).grid(row=1,column=0,columnspan=2,sticky='w')
         row=ttk.Frame(query);row.grid(row=1,column=0,sticky='ew',pady=(8,0))
         self.button(row,'Search library',self.search,side='left')
         self.button(row,'Ask local model',self.question_model,side='left',padx=6)
@@ -304,6 +341,9 @@ class App:
         activity_label.pack(anchor='w',pady=(0,6))
         activity.bind('<Configure>',lambda event:activity_label.configure(wraplength=max(150,event.width-16)))
         self.live=ScrolledText(activity,wrap='word',height=8,width=30,font=('Consolas',9),padx=8,pady=8,state='disabled',relief='flat');self.live.pack(fill='both',expand=True)
+        self.thinking_tab=ttk.Frame(self.detail_tabs,padding=6);self.detail_tabs.add(self.thinking_tab,text='Thinking')
+        self.thinking_live=ScrolledText(self.thinking_tab,wrap='word',height=8,width=30,font=('Consolas',9),padx=8,pady=8,state='disabled',relief='flat');self.thinking_live.pack(fill='both',expand=True)
+        activity_label.configure(text='Tool actions, steering and evidence checklist · unvalidated')
         self.timing_details=ScrolledText(timing,wrap='word',height=8,width=30,font=('Consolas',9),padx=8,pady=8,state='disabled',relief='flat');self.timing_details.pack(fill='both',expand=True)
         self.workspace.add(results,weight=2);self.workspace.add(self.detail_tabs,weight=3)
         self.metrics=tk.StringVar();self.metrics_label=ttk.Label(self.search_tab,textvariable=self.metrics,wraplength=1000)
@@ -345,7 +385,7 @@ class App:
         for source in sources:
             if source['id'] in displayed:continue
             displayed.add(source['id'])
-            tag='source-'+str(source['id']);label=f"[{source['id']}] {source['title']}"
+            tag='source-'+str(source['id']);label=f"[{source['id']}] {source['title']}"+(f" · PDF page {source['page']}" if type(source.get('page')) is int else '')
             self.output.insert('end',label+'\n',tag);self.output.tag_configure(tag,foreground='#145da0',underline=True)
             detail='\n'.join([source['title'],source['locator']]+[f'{k}: {source[k]}' for k in ('added_at','modified_at','published_at') if source.get(k)])
             self.output.tag_bind(tag,'<Enter>',lambda e,t=detail:(self.output.configure(cursor='hand2'),self.hint(e,t)))
@@ -354,16 +394,80 @@ class App:
 
     def open_link(self,source):
         self.hide_hint()
-        try:open_source(source)
+        try:
+            result=open_source(source,self.raw.get('pdf_viewer'))
+            if result and result.get('fallback'):self.status.set('Opened normally: '+result['fallback'])
         except Exception as error:messagebox.showerror('Open source',str(error),parent=self.root)
 
     def get_library(self,config):
-        key=(config['database'],int(config.get('database_options',{}).get('cache_mb',32)))
+        from .sqlite_paths import network_path
+        managed=config.get('library_sync',{}).get('enabled',False) or network_path(config['database'])
+        management_key=(config['database'],config.get('library_sync',{}).get('local_root')) if managed else None
+        if management_key!=self.management_key:
+            if self.library:self.library.close();self.library=None;self.library_key=None
+            if self.manager:self.manager.close();self.manager=None
+            self.management_key=None;self.manual_searcher=None
+        if managed and self.manager is None:
+            from .library_management import ManagedLibrary
+            self.manager=ManagedLibrary(config['database'],root=config.get('library_sync',{}).get('local_root'),source_paths=[s['path'] for s in config['sources']])
+            self.management_key=management_key
+        path=str(self.manager.path) if self.manager else config['database']
+        key=(path,int(config.get('database_options',{}).get('cache_mb',32)))
         if key!=self.library_key:
             if self.library:self.library.close()
             self.library=None;self.library_key=None
             self.library=Library(key[0],cache_mb=key[1]);self.library_key=key
+            self.manual_searcher=None
         return self.library
+
+    def queue_steering(self):
+        try:
+            if self.active_steering is None:raise ValueError('Start a model question before queuing an instruction')
+            item=self.active_steering.put(self.steering_text.get());self.steering_text.set('')
+            self.steering_status.set('Queued instruction '+str(item['id'])+' for the next turn')
+            self.emit({'type':'steering','status':'queued',**item})
+        except ValueError as error:self.steering_status.set(str(error))
+
+    def sync_status(self):
+        if self.busy or not self.save():return
+        config=self.cfg()
+        def work():
+            self.get_library(config)
+            return self.manager.status() if self.manager else {'mode':'Direct local library; AppData sync disabled'}
+        self.submit(work,self.display_report)
+
+    def sync_now(self):
+        if self.busy or not self.save():return
+        config=self.cfg()
+        def work():
+            self.get_library(config)
+            if not self.manager:raise ValueError('Enable AppData working copy or select a network library first')
+            self.emit({'type':'phase','text':'Publishing consistent library snapshot…'})
+            return self.manager.sync(self.cancel)
+        self.submit(work,self.display_report,inference=True)
+
+    def model_diagnostics(self):
+        if self.busy:return
+        def work():
+            if not self.model:return {'status':'Load the model first to inspect runtime diagnostics'}
+            from .diagnostics import memory_observations
+            return dict(self.model.diagnostics(),memory=memory_observations())
+        self.submit(work,self.display_report)
+
+    def load_published(self):
+        if self.busy or not self.save():return
+        if not messagebox.askyesno('Load published copy','Replace the local working copy with the published copy? Any pending local work will be saved in before-network-import.db in the AppData library folder. This chooses the published version; it does not merge changes.',parent=self.root):return
+        config=self.cfg()
+        def work():
+            self.get_library(config)
+            if not self.manager:raise ValueError('Enable AppData working copy first')
+            if self.library:self.library.close();self.library=None;self.library_key=None
+            self.manual_searcher=None
+            return self.manager.adopt_published(preserve_pending=True)
+        def show(result):
+            self.hits={};self.tree.delete(*self.tree.get_children());self.next_offset=None;self.open_doc=None;self.next_char=None
+            self.display_report(result)
+        self.submit(work,show)
 
     def emit(self,event):self.events.put(event)
 
@@ -403,18 +507,29 @@ class App:
             if self.closing:
                 self.unload()
                 if self.library:self.library.close();self.library=None
+                if self.manager:self.manager.close();self.manager=None
             self.results.put((result,error,callback))
 
     def poll(self):
         if self.ingesting:self.display_ingest_progress()
         # A fixed-size queue plus batched UI writes bounds streaming overhead and memory.
-        text=[]
+        text=[];thought=[]
+        def split(parts):
+            for channel,chunk in parts:(thought if channel=='thinking' else text).append(chunk)
         for _ in range(256):
             try:event=self.events.get_nowait()
             except queue.Empty:break
-            if event['type']=='text':text.append(event['text'])
-            elif event['type']=='round':text.append(f"\n--- Model round {event['round']} ---\n")
+            if event['type']=='text':split(self.display_stream.feed(event['text']))
+            elif event['type']=='stream_end':split(self.display_stream.feed('',final=True))
+            elif event['type']=='round':
+                split(self.display_stream.feed('',final=True))
+                from .display_stream import DisplayStream
+                self.display_stream=DisplayStream(event.get('thinking',False))
+                text.append(f"\n--- Model round {event['round']} ---\n");thought.append(f"\n--- Model round {event['round']} ---\n")
             elif event['type']=='phase':self.status.set(event['text'])
+            elif event['type']=='steering':
+                text.append('\nInstruction '+str(event['id'])+' '+event['status']+': '+event['text']+'\n')
+                self.steering_status.set('Instruction '+str(event['id'])+' '+event['status']+(f" on round {event['applied_round']}" if event.get('applied_round') else ''))
             elif event['type']=='notebook':
                 text.append(f"\nNotebook: {event['used_tokens']}/{event['limit_tokens']} tokens, {event['remaining_tokens']} free, {event['items']} items.\n")
                 if event.get('error'):text.append('Save rejected: '+event['error']+'\n')
@@ -425,8 +540,13 @@ class App:
             if int(self.live.index('end-1c').split('.')[0])>1000:self.live.delete('1.0','end-1000lines')
             if len(self.live.get('1.0','end-1c'))>32000:self.live.delete('1.0','end-32000c')
             self.live.see('end');self.live.configure(state='disabled')
+        if thought:
+            self.thinking_live.configure(state='normal');self.thinking_live.insert('end',''.join(thought))
+            if len(self.thinking_live.get('1.0','end-1c'))>32000:self.thinking_live.delete('1.0','end-32000c')
+            self.thinking_live.see('end');self.thinking_live.configure(state='disabled')
         try:
             result,error,callback=self.results.get_nowait();self.busy=False
+            self.active_steering=None
             if self.ingesting:
                 self.ingesting=False;self.ingest_bar.stop()
             if self.closing:self.root.destroy();return
@@ -439,6 +559,16 @@ class App:
                 elapsed=time.perf_counter()-self.operation_started
                 if not isinstance(result,dict) or 'gui_timing' not in result:self.metrics.set(self.metrics.get()+f' | Displayed in {elapsed:.2f}s')
         except queue.Empty:pass
+        if not self.busy and self.manager and self.raw.get('library_sync',{}).get('auto_sync',False) and time.monotonic()>=self.next_sync_check:
+            self.next_sync_check=time.monotonic()+15
+            def background_sync():
+                if self.manager.due():
+                    try:return self.manager.sync(self.cancel)
+                    except Exception:return self.manager.status()
+                return None
+            def sync_finished(result):
+                if result:self.status.set('Library sync pending: '+result['error'] if result.get('error') else 'Library snapshot synced to '+result['network_path'])
+            self.submit(background_sync,sync_finished,inference=True)
         self.root.after(80,self.poll)
 
     def ingest(self,automatic=False):
@@ -460,7 +590,8 @@ class App:
             skipped=sum(r.get('skipped',0) for r in reports);cached=sum(r.get('cached',0) for r in reports)
             cancelled=any(r.get('cancelled') for r in reports)
             if not cancelled:self.ingest_bar.configure(mode='determinate',maximum=1,value=1)
-            self.status.set(('Refresh cancelled' if cancelled else 'Refresh complete with errors' if errors else 'Refresh complete')+f': {count} items processed, {cached} cached, {skipped} skipped, {errors} errors. Log: '+str(Path(config['database']).parent/'ingestion.log'))
+            log_path=reports[0].get('log_file') if reports else None
+            self.status.set(('Refresh cancelled' if cancelled else 'Refresh complete with errors' if errors else 'Refresh complete')+f': {count} items processed, {cached} cached, {skipped} skipped, {errors} errors. Log: '+str(log_path or Path(config['database']).parent/'ingestion.log'))
             if not automatic:self.display_report(reports)
         self.submit(work,show)
 
@@ -483,20 +614,32 @@ class App:
 
     def search(self,offset=0):
         if not self.save():return
-        config=self.cfg();query=self.question.get();options=dict(after=self.after.get() or None,before=self.before.get() or None,date_field=self.date_field.get(),sort=self.sort.get(),limit=20,offset=offset,exact_count=self.exact_count.get(),input_mode=self.search_input_mode.get())
+        config=self.cfg();query=self.question.get();options=dict(after=self.after.get() or None,before=self.before.get() or None,date_field=self.date_field.get(),sort=self.sort.get(),limit=20,offset=offset,exact_count=self.exact_count.get(),input_mode=self.search_input_mode.get(),_relevance_question=self.relevance_question.get().strip())
         if offset and getattr(self,'search_request',None):
             query,options=self.search_request;options=dict(options,offset=offset)
         else:self.search_request=(query,dict(options))
         submitted=time.perf_counter()
         def work():
             started=time.perf_counter();lib=self.get_library(config);opened=time.perf_counter()
-            result=lib.search(query,**options)
+            arguments=dict(options);relevance=arguments.pop('_relevance_question')
+            if relevance:
+                from .rerank import QuestionSearch
+                if not offset or self.manual_searcher is None:
+                    ranker=self.loaded_reranker(config)
+                    if ranker is None:raise ValueError('Enable a reranker in Settings to rank results for a question, or clear the relevance question for ordinary FTS5')
+                    self.manual_searcher=QuestionSearch(lib,ranker,relevance,self.cancel,self.emit)
+                before_fts=self.manual_searcher.fts_seconds;before_rank=self.manual_searcher.rerank_seconds
+                result=self.manual_searcher.search(query=query,relevance_query=relevance,**arguments)
+                result['timings']={'fts_seconds':self.manual_searcher.fts_seconds-before_fts,'rerank_seconds':self.manual_searcher.rerank_seconds-before_rank}
+                result['reranking_trace']=self.manual_searcher.trace
+            else:
+                self.manual_searcher=None;result=lib.search(query,**arguments)
             result['timings'].update(queue_seconds=started-submitted,connection_seconds=opened-started)
             return result
         def show(result):
             render_started=time.perf_counter()
             self.next_offset=result['next_offset'];self.result_mode='search'
-            self.result_summary.set(str(len(result['results']))+' passages on this page'+(' · more available' if self.next_offset is not None else ''))
+            self.result_summary.set(str(len(result['results']))+' passages on this page'+(' · bounded reranked shortlist' if result.get('match_scope')=='candidate_pool' else '')+(' · more available' if self.next_offset is not None else ''))
             self.tree.delete(*self.tree.get_children());self.hits={}
             for i,hit in enumerate(result['results']):
                 self.hits[str(i)]=hit;loc=hit['locations'][0]
@@ -564,13 +707,18 @@ class App:
             self.unload()
             from .model import GGUF
             self.emit({'type':'phase','text':'Loading model'})
-            started=time.perf_counter();self.model=GGUF(**config['model']);self.model_key=key
+            from .inference_lock import InferenceLease
+            self.model_lease=InferenceLease()
+            try:
+                started=time.perf_counter();self.model=GGUF(**config['model']);self.model_key=key
+            except BaseException:self.model_lease.close();self.model_lease=None;raise
             self.last_load_seconds=time.perf_counter()-started
         else:self.last_load_seconds=0
         self.model.cancel_event=self.cancel;return self.model
 
     def unload(self):
         if self.model:self.model.close();self.model=None;self.model_key=None
+        if self.model_lease:self.model_lease.close();self.model_lease=None
         self.unload_reranker()
         return {'model':'unloaded'}
 
@@ -594,7 +742,7 @@ class App:
             model=self.loaded_model(config)
             if self.cancel.is_set():return {'status':'cancelled'}
             result=model.complete([{'role':'user','content':'Reply with READY.'}],on_event=self.emit)
-            return {'response':result['choices'][0]['text'],'usage':result.get('usage'),'timings':result.get('timings'),'load_seconds':self.last_load_seconds,'DLL folders':model.dlls.paths}
+            return {'response':result['choices'][0]['text'],'usage':result.get('usage'),'timings':result.get('timings'),'load_seconds':self.last_load_seconds,'DLL folders':model.dlls.paths,'diagnostics':model.diagnostics()}
         self.submit(work,self.display_report,inference=True)
 
     def question_model(self):
@@ -603,7 +751,10 @@ class App:
         config=self.cfg();question=self.question.get().strip()
         if not question:return
         self.question_serial+=1;question_serial=self.question_serial
+        from .steering import SteeringQueue
+        steering=SteeringQueue();self.active_steering=steering;self.steering_status.set('Question running; instructions can be queued.')
         self.live.configure(state='normal');self.live.delete('1.0','end');self.live.configure(state='disabled')
+        self.thinking_live.configure(state='normal');self.thinking_live.delete('1.0','end');self.thinking_live.configure(state='disabled')
         submitted=time.perf_counter();clock={}
         def work():
             from .agent import ask
@@ -613,13 +764,14 @@ class App:
             clock['load_seconds']=time.perf_counter()-started
             started=time.perf_counter();library=self.get_library(config)
             clock['library_seconds']=time.perf_counter()-started
-            result=ask(library,model,question,on_event=self.emit,prompts_file=config.get('prompts_file'),reranker=self.loaded_reranker(config),note_tokens=config.get('agent_options',{}).get('note_tokens',6000),effort=config.get('agent_options',{}).get('effort','legacy'))
+            result=ask(library,model,question,on_event=self.emit,prompts_file=config.get('prompts_file'),reranker=self.loaded_reranker(config),note_tokens=config.get('agent_options',{}).get('note_tokens',6000),effort=config.get('agent_options',{}).get('effort','legacy'),steering=steering)
             result['timings']['load_seconds']=clock['load_seconds']
-            trace=Path(config['database']).parent/'last-gui-search.json'
+            trace=library.path.parent/'last-gui-search.json';clock['trace']=trace
             with self.trace_lock:trace.write_text(json.dumps(result,ensure_ascii=False,indent=2),'utf-8')
             clock['worker_finished']=time.perf_counter()
             return result
         def show(result):
+            self.active_steering=None;self.steering_status.set('Question complete; see Activity for steering history.')
             render_started=time.perf_counter()
             display=result.get('answer') or result['status']
             if result.get('gaps'):display+='\n\nUnresolved points:\n'+'\n'.join('• '+gap for gap in result['gaps'])
@@ -642,7 +794,7 @@ class App:
             self.metrics.set(self.metrics.get()+' | '+result.get('effort','legacy')+' · '+result.get('stop_reason',result['status']))
             # Save final GUI measurements after the answer is displayed. This background
             # persistence is deliberately outside click-to-answer completion time.
-            trace=Path(config['database']).parent/'last-gui-search.json'
+            trace=clock['trace']
             def persist():
                 temporary=None
                 try:

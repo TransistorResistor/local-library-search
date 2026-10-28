@@ -60,9 +60,14 @@ class Library:
         self.db.execute(f'PRAGMA cache_size={-cache_mb*1024}')
         self.db.execute('PRAGMA foreign_keys=ON')
         tables={r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+        self.metadata_enabled='metadata_info' in tables
+        if self.metadata_enabled:
+            metadata_version=self.db.execute("SELECT value FROM metadata_info WHERE key='schema'").fetchone()
+            if not metadata_version or metadata_version[0]!='1':
+                self.db.close();raise ValueError('Unsupported metadata schema; upgrade the application before writing')
         if tables:
             owned=self.db.execute("SELECT value FROM settings WHERE key='schema'").fetchone() if 'settings' in tables else None
-            if not owned or owned[0]!='1':
+            if not owned or owned[0] not in ('1','2'):
                 self.db.close();raise ValueError('Destination is not a local_search library; choose a new database file')
         # Current libraries need no writes or full title-index scan on query opens.
         if tables and 'title_fts' in tables:
@@ -71,7 +76,7 @@ class Library:
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.executescript(SCHEMA)
         version=self.db.execute("SELECT value FROM settings WHERE key='schema'").fetchone()
-        if version and version[0]!='1':raise ValueError('Unsupported library schema')
+        if version and version[0] not in ('1','2'):raise ValueError('Unsupported library schema')
         self.db.execute("INSERT OR IGNORE INTO settings VALUES('schema','1')")
         self.db.execute('INSERT INTO title_fts(rowid,title) SELECT id,title FROM sources WHERE id NOT IN (SELECT rowid FROM title_fts)')
         self.db.commit()

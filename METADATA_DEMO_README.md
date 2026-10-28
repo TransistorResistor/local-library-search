@@ -1,5 +1,7 @@
 # Standalone metadata extraction trial
 
+For configurable fields/prompts, random-N trials, bounded JSON recovery and migration/write-back to the search library, use the [metadata sidecar workflow](METADATA_WORKFLOW.md). The original demo below remains a read-only trial.
+
 This standalone demo reads selected source rows from the app's SQLite library, runs the configured local GGUF, and writes a review report. It never writes extracted fields back into the library. It is separate from normal ingestion and the desktop GUI. The generic demo script and this guide are published with the application. Your source-ID selection file, tests, documents and generated reports remain excluded from the public source export.
 
 ## Select a repeatable batch
