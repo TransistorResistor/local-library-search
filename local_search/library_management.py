@@ -92,6 +92,10 @@ class ManagedLibrary:
     def _save(self):atomic_json(self.state_path,self.state)
 
     def _import(self):
+        from .library_guard import LibraryGuard
+        with LibraryGuard(self.path,exclusive=True):self._import_locked()
+
+    def _import_locked(self):
         refuse_sidecars(self.origin)
         before=digest(self.origin);stage=self.directory/'import.tmp'
         try:

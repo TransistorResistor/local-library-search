@@ -282,6 +282,7 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--config',default='local-search.json')
     sub=parser.add_subparsers(dest='command',required=True)
     sub.add_parser('inspect')
+    sub.add_parser('gui')
     migration=sub.add_parser('migrate');migration.add_argument('--apply',action='store_true')
     profile_parser=sub.add_parser('profile');profile_parser.add_argument('--profile')
     run=sub.add_parser('run');run.add_argument('--profile');run.add_argument('--dry-run',action='store_true');run.add_argument('--random-items',type=int,default=20);run.add_argument('--all',action='store_true');run.add_argument('--seed',type=int);run.add_argument('--collection',action='append',default=[]);run.add_argument('--folder',action='append',default=[]);run.add_argument('--source-sampling',action='store_true');run.add_argument('--manifest');run.add_argument('--output-dir',required=True);run.add_argument('--force',action='store_true')
@@ -297,6 +298,9 @@ def main(argv=None):
     restore_parser=sub.add_parser('restore');restore_parser.add_argument('--backup',required=True);restore_parser.add_argument('--apply',action='store_true')
     apply_parser=sub.add_parser('apply-report');apply_parser.add_argument('--report-dir',required=True);apply_parser.add_argument('--apply',action='store_true');apply_parser.add_argument('--accept-reviewed',action='store_true');apply_parser.add_argument('--force',action='store_true')
     args=parser.parse_args(argv)
+    if args.command=='gui':
+        from .metadata_gui import launch
+        launch(args.config);return
     if args.command=='profile':
         profile=load_profile(args.profile);print(json.dumps({'profile':profile,'hash':profile_hash(profile),'prompt':instructions(profile),'schema':schema_for(profile)},ensure_ascii=False,indent=2));return
     config=configuration(args.config);path=database_path(config)
@@ -398,12 +402,9 @@ def main(argv=None):
                 result['profile']=json.loads(definition[0]);result['resolved_prompt']=definition[1]
                 if args.accept:
                     if result['status']!='needs_review' or json.loads(result['issues']):raise ValueError('Only valid needs-review results can be accepted')
-                    from .metadata_store import current_source
-                    current=current_source(library.db,result['source_id'])
-                    if not current or current['source_uuid']!=result['source_uuid'] or current['text_hash']!=result['content_hash']:raise ValueError('Source changed; result is stale')
-                    with library.db:
-                        library.db.execute("UPDATE metadata_jobs SET status='accepted',updated_at=? WHERE id=?",(time.time(),args.job))
-                        library.db.execute("UPDATE metadata_values SET status='accepted' WHERE job_id=?",(args.job,))
+                    from .metadata_review import fetch,save
+                    record=fetch(library.path,args.job)
+                    save(library.path,args.job,record['metadata'],record['review_token'],record['manual_fields'],True)
                     result['status']='accepted'
             elif args.command in ('run','work'):
                 from .model import GGUF

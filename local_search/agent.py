@@ -12,7 +12,11 @@ from .query import normalise_search
 def packed(value):return json.dumps(value,ensure_ascii=False,separators=(',',':'))
 
 
-def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,prompts_file=None,reranker=None,effort='legacy',steering=None):
+def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,prompts_file=None,reranker=None,effort='legacy',steering=None,conversation_history=None,prior_evidence=None):
+    history=[]
+    for item in (conversation_history or [])[-40:]:
+        if not isinstance(item,dict) or item.get('role') not in ('user','assistant') or not isinstance(item.get('content'),str):raise ValueError('Conversation history must contain user/assistant text messages')
+        history.append({'role':item['role'],'content':item['content'][:8000]})
     if type(note_tokens) is not int or not 64<=note_tokens<=32768:
         raise ValueError('Notebook budget must be 64..32768 tokens')
     if not isinstance(effort,str) or effort not in MODES:raise ValueError('effort must be legacy, quick, balanced or thorough')
@@ -21,17 +25,24 @@ def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,pr
     started=time.perf_counter()
     stages={'model_seconds':0.0,'fts_search_seconds':0.0,'catalog_seconds':0.0,'context_seconds':0.0,'document_seconds':0.0,'notes_seconds':0.0,'other_tools_seconds':0.0}
     system_prompt=load_prompt('search.system',prompts_file)
+    if history:system_prompt+='\nEarlier messages provide conversational context only, not verified source evidence. Resolve follow-up references using that context, but use retrieved or revalidated source evidence for factual citations. Earlier answers can be incomplete or outdated. Older conversation may have been omitted to fit the context.'
+    if prior_evidence:system_prompt+='\nprevious_turn tool results are retained source excerpts, revalidated against the current library. You may use and cite them directly while visible; retrieve additional evidence for new needs. Revalidation means those excerpts are unchanged; it does not establish that no newer contradictory documents exist. They are a bounded selection, not the full previous document or an exhaustive update check.'
     if steering is not None:system_prompt+='\nThe user_steering list contains later instructions from the user for this question, in order. Apply them alongside the original question; later corrections take precedence. They persist through checkpoints. Reassess coverage after a correction and keep using retrieved evidence.'
     if effort!='legacy':system_prompt+='\n'+COMPLETION_GUIDANCE+'\nEffort: '+effort+'. '+{'quick':'Be direct and finish promptly once material needs are addressed.','balanced':'Resolve material ambiguity with targeted checks.','thorough':'Broaden coverage and check revisions, conflicts and independent sources where warranted.'}[effort]
     searcher=None
     if reranker is not None and reranker.config.enabled:
         from .rerank import QuestionSearch,GUIDANCE
-        searcher=QuestionSearch(library,reranker,question,getattr(model,'cancel_event',None),on_event)
+        relevance=('\n'.join(item['content'] for item in history if item['role']=='user')+'\nCurrent question: '+question)[-8000:] if history else question
+        searcher=QuestionSearch(library,reranker,relevance,getattr(model,'cancel_event',None),on_event)
         system_prompt+='\n\n'+GUIDANCE
     owned=not library.db.in_transaction
     if owned:library.db.execute('BEGIN')
     try:
-        result=_ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages,searcher,effort,steering)
+        from .conversation_evidence import restore,snapshot
+        carried,dropped=restore(library,prior_evidence)
+        result=_ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages,searcher,effort,steering,history,carried)
+        result['conversation_evidence']=snapshot(library,result.pop('_carry_results',[]))
+        result['previous_evidence']={'revalidated':len(carried),'dropped':dropped}
         if hasattr(model,'diagnostics'):result['model_diagnostics']=model.diagnostics()
         if searcher is not None:
             result['reranking']=searcher.trace
@@ -44,10 +55,10 @@ def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,pr
         ids=result.get('citations',[])
         result['sources']=[]
         for ident in dict.fromkeys(ids):
-            row=library.db.execute('SELECT id,title,locator,collection,added_at,modified_at,published_at FROM sources WHERE id=?',(ident,)).fetchone()
+            row=library.db.execute('SELECT id,doc_id,title,locator,collection,added_at,modified_at,published_at FROM sources WHERE id=?',(ident,)).fetchone()
             if row:
                 pages=set()
-                for entry in result['trace']:
+                for entry in [{'result':item} for item in carried]+result['trace']:
                     evidence=entry.get('result',{})
                     for hit in evidence.get('results',[]) if isinstance(evidence,dict) else []:
                         if isinstance(hit,dict):
@@ -64,9 +75,13 @@ def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,pr
     return result
 
 
-def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages,searcher,effort,steering=None):
+def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages,searcher,effort,steering=None,history=None,carried=None):
+    conversation=list(history or []);history_trimmed=0;base_relevance=searcher.question if searcher else question
     recent=[];notes={};seen={};exposed=set();serial=0;trace=[];checks=[];evictions=0
     coverage=[];retrieval=RetrievalProgress();policy_events=[];finalising=False;instructions=[];steering_retry=False
+    visible=set();prior_pool={}
+    for result in carried or []:
+        serial+=1;seen[serial]=result;prior_pool[serial]=result;entry={'evidence_id':serial,'tool':'previous_turn','result':result};trace.append(dict(entry,round=0,status='revalidated'))
     def notebook(saved=None):
         saved=notes if saved is None else saved
         used=len(model.llm.tokenize(packed(saved).encode('utf-8'),add_bos=False)) if saved else 0
@@ -78,20 +93,32 @@ def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,st
             if any(i['applied_round'] is None for i in items) and result['status']!='cancelled':
                 result.update(status='steering_pending',stop_reason='steering_budget_exhausted',answer=None)
         result.setdefault('stop_reason',result['status'])
-        return dict(result,notebook=notebook(),effort=effort,response_budget=max_rounds,coverage=coverage,policy_events=policy_events)
+        retained=[];identities=set()
+        if result['status'] in ('answered','answered_with_gaps'):
+            from .conversation_evidence import fragments
+            for fragment in fragments([seen[i] for i in sorted(visible,reverse=True)],result.get('citations',[])):
+                identity=packed(fragment)
+                if identity in identities:continue
+                if model.count([{'role':'user','content':packed(retained+[fragment])}])>min(4000,model.context//4):continue
+                retained.append(fragment);identities.add(identity)
+                if len(retained)>=8:break
+        result['_carry_results']=retained
+        return dict(result,notebook=notebook(),effort=effort,response_budget=max_rounds,coverage=coverage,policy_events=policy_events,conversation_messages_omitted=history_trimmed)
     def messages(saved=None,history=None,checklist=None):
         saved=notes if saved is None else saved
         history=recent if history is None else history
         checklist=coverage if checklist is None else checklist
         payload={'saved_evidence':saved,'notebook':notebook(saved),'recent_results':history,'evicted_results':evictions}
+        existing=set(saved)|{entry['evidence_id'] for entry in history}
+        if prior_pool:payload['previous_turn_evidence']={ident:value for ident,value in prior_pool.items() if ident not in existing}
         if instructions:payload['user_steering']=[i['text'] for i in instructions]
         if effort!='legacy':
-            already=set(saved)|{entry['evidence_id'] for entry in history}
+            already=existing|set(prior_pool)
             pinned={i:seen[i] for item in checklist for i in item['evidence_ids'] if i not in already}
             payload.update(coverage=checklist,coverage_evidence=pinned,unproductive_retrievals=retrieval.stalled)
             payload['instruction']='FINALISE NOW: only answer is allowed. Use visible evidence, disclose unknowns and unresolved needs.' if finalising else 'Address the next material evidence gap, or answer if ready.'
             if retrieval.stalled>=3:payload['stall_warning']='Recent retrieval added no new excerpts. Answer if ready; otherwise target a concrete gap with a different strategy. Do not treat repeated/empty results as proof of absence.'
-        return [{'role':'system','content':system_prompt},{'role':'user','content':question},{'role':'user','content':packed(payload)}]
+        return [{'role':'system','content':system_prompt}]+conversation+[{'role':'user','content':question},{'role':'user','content':packed(payload)}]
     for step in range(max_rounds+(2 if steering is not None else 0)):
         if step>=max_rounds and not steering_retry:break
         steering_retry=False
@@ -100,30 +127,37 @@ def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,st
             applied=steering.apply(step+1);instructions.extend(applied)
             if applied:
                 coverage=[];retrieval.stalled=0
-                if searcher is not None:searcher.question=question+'\nUser instructions:\n'+'\n'.join(i['text'] for i in instructions)
+                if searcher is not None:searcher.question=(base_relevance+'\nUser instructions:\n'+'\n'.join(i['text'] for i in instructions))[-8000:]
                 for item in applied:
                     trace.append({'round':step+1,'tool':'steering','status':'applied','instruction':item})
                     if on_event:on_event({'type':'steering','status':'applied',**item})
         if getattr(model,'cancel_event',None) is not None and model.cancel_event.is_set():
             return finish(status='cancelled',answer=None,trace=trace,context_checks=checks)
         prompt=messages()
+        while model.count(prompt)+model.output>model.context and conversation:
+            removed=min(2,len(conversation));del conversation[:removed];history_trimmed+=removed;prompt=messages()
         while model.count(prompt)+model.output>model.context and recent:
             recent.pop(0);evictions+=1;prompt=messages()
+        protected=set(notes)|{i for item in coverage for i in item['evidence_ids']}
+        while model.count(prompt)+model.output>model.context and set(prior_pool)-protected:
+            prior_pool.pop(next(i for i in prior_pool if i not in protected));evictions+=1;prompt=messages()
         if model.count(prompt)+model.output>model.context:
             if instructions:return finish(status='incomplete_output',stop_reason='steering_context_limit',answer=None,trace=trace,context_checks=checks)
             raise ValueError('Question and saved notes exceed context; shorten question or notebook budget')
-        visible=set(notes)|{entry['evidence_id'] for entry in recent}
+        visible=set(notes)|{entry['evidence_id'] for entry in recent}|set(prior_pool)
         if effort!='legacy':visible.update(i for item in coverage for i in item['evidence_ids'])
         exposed.update(entry['evidence_id'] for entry in recent)
         exposed.update(notes)
+        exposed.update(prior_pool)
         if on_event:on_event({'type':'round','round':step+1,'thinking':getattr(model,'thinking',False)})
+        if on_event:on_event({'type':'activity','phase':'thinking'})
         if finalising:
             policy_events.append({'round':step+1,'reason':'reserved_final_response'})
             if on_event:on_event({'type':'phase','text':'Finalising answer from retrieved evidence'})
         model_started=time.perf_counter()
         response=model.complete(prompt,on_event=on_event) if on_event else model.complete(prompt)
         stages['model_seconds']+=time.perf_counter()-model_started
-        checks.append({'reserved_total':response['reserved_total'],'usage':response.get('usage',{}),'timings':response.get('timings',{}),'finish_reason':response['choices'][0].get('finish_reason')})
+        checks.append({'reserved_total':response['reserved_total'],'usage':response.get('usage',{}),'timings':response.get('timings',{}),'finish_reason':response['choices'][0].get('finish_reason'),'model_response':response['choices'][0]['text'],'thinking':getattr(model,'thinking',False)})
         if getattr(model,'cancel_event',None) is not None and model.cancel_event.is_set():
             return finish(status='cancelled',answer=None,trace=trace,context_checks=checks)
         if response['choices'][0].get('finish_reason')=='length':
@@ -173,6 +207,7 @@ def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,st
                     continue
                 return finish(status='answered_with_gaps' if incomplete else 'answered',stop_reason=reason,answer=action['answer'],gaps=gaps,citations=citations,trace=trace,context_checks=checks,evicted_results=evictions,saved_notes=list(notes))
             if on_event:on_event({'type':'phase','text':'Tool: '+str(name)})
+            if on_event and name in ('search','catalog'):on_event({'type':'activity','phase':'selecting'})
             tool_started=time.perf_counter()
             stage='tool'
             if name=='search':
@@ -211,6 +246,12 @@ def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,st
                      'save_note':'notes_seconds','remove_note':'notes_seconds','checkpoint':'notes_seconds'}.get(name,'other_tools_seconds')
                 stages[key]+=elapsed
         serial+=1
+        if on_event and isinstance(result,dict) and name in ('search','catalog','document','context'):
+            titles=[]
+            for hit in result.get('results',[]):
+                if isinstance(hit,dict):titles.extend(loc.get('title','') for loc in hit.get('locations',[]))
+            titles.extend(source.get('title','') for source in result.get('sources',[]))
+            if titles:on_event({'type':'activity','phase':'reading','titles':list(dict.fromkeys(t for t in titles if t))[:20]})
         # A single large tool result is trimmed as data; the model can request smaller pages.
         entry={'evidence_id':serial,'tool':name,'submitted_action':submitted,'result':result}
         while model.count([{'role':'user','content':packed(entry)}])>min(2500,model.context//3):

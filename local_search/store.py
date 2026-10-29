@@ -55,6 +55,12 @@ class Library:
         self.path=Path(path).resolve()
         if network_path(self.path):raise ValueError('The active search library must be on local storage; network paths are only supported as clipper sources')
         self.path.parent.mkdir(parents=True,exist_ok=True)
+        from .library_guard import LibraryGuard
+        self.guard=LibraryGuard(self.path);self.closed=False
+        try:self._open(cache_mb,started)
+        except BaseException:self.close();raise
+
+    def _open(self,cache_mb,started):
         self.db=sqlite3.connect(self.path,timeout=30)
         self.db.row_factory=sqlite3.Row
         self.db.execute(f'PRAGMA cache_size={-cache_mb*1024}')
@@ -82,7 +88,10 @@ class Library:
         self.db.commit()
         self.setup_seconds=time.perf_counter()-started
 
-    def close(self):self.db.close()
+    def close(self):
+        if hasattr(self,'db'):self.db.close()
+        if hasattr(self,'guard'):self.guard.close()
+        self.closed=True
     def __enter__(self):return self
     def __exit__(self,*exc):self.close()
 

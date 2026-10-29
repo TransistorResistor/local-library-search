@@ -43,6 +43,8 @@ class App:
         self.manager=None;self.management_key=None;self.manual_searcher=None;self.active_steering=None
         self.model_lease=None
         self.next_sync_check=time.monotonic()+15
+        self.conversation=[];self.turns=[];self.conversation_turn=0;self.ask_active=False;self.reading_titles=[];self.reading_index=0;self.next_title_at=0
+        self.stream_action='';self.stream_thinking='';self.conversation_library=None;self.conversation_evidence=None
         from .display_stream import DisplayStream
         self.display_stream=DisplayStream()
         self.events=queue.Queue(maxsize=256);self.library=None;self.library_key=None;self.tooltip=None
@@ -57,10 +59,11 @@ class App:
         top=ttk.Frame(root,padding=(14,10));top.pack(fill='x')
         ttk.Label(top,text='Local Library Search',font=('Segoe UI',16,'bold')).pack(side='left')
         ttk.Label(top,text='Native desktop · local files · local model').pack(side='right')
+        self.stop=ttk.Button(top,text='Stop operation',command=self.cancel.set,state='disabled');self.stop.pack(side='right',padx=10)
         self.status_label=ttk.Label(root,textvariable=self.status,padding=(14,8),wraplength=1050)
         self.status_label.pack(side='bottom',fill='x')
         self.tabs=ttk.Notebook(root);self.tabs.pack(fill='both',expand=True,padx=12,pady=(0,4))
-        self.search_tab=ttk.Frame(self.tabs,padding=10);self.setup_tab=ttk.Frame(self.tabs)
+        self.search_tab=ttk.Frame(self.tabs,padding=10);self.ask_tab=ttk.Frame(self.tabs,padding=10);self.setup_tab=ttk.Frame(self.tabs)
         self.setup_actions=ttk.Frame(self.setup_tab,padding=(12,8));self.setup_actions.pack(side='bottom',fill='x')
         self.setup_canvas=tk.Canvas(self.setup_tab,highlightthickness=0)
         scrollbar=ttk.Scrollbar(self.setup_tab,orient='vertical',command=self.setup_canvas.yview)
@@ -68,7 +71,7 @@ class App:
         self.setup=ttk.Frame(self.setup_canvas,padding=12);window=self.setup_canvas.create_window((0,0),window=self.setup,anchor='nw')
         self.setup.bind('<Configure>',lambda e:self.setup_canvas.configure(scrollregion=self.setup_canvas.bbox('all')))
         self.setup_canvas.bind('<Configure>',lambda e:self.setup_canvas.itemconfigure(window,width=e.width))
-        self.tabs.add(self.search_tab,text='Search');self.tabs.add(self.setup_tab,text='Settings')
+        self.tabs.add(self.search_tab,text='Search');self.tabs.add(self.ask_tab,text='Ask');self.tabs.add(self.setup_tab,text='Settings')
         self.build_search();self.build_setup()
         root.bind('<Configure>',self.resize_labels)
         if not self.path.exists():self.tabs.select(self.setup_tab)
@@ -166,6 +169,7 @@ class App:
         self.button(actions,'Save settings',self.save,side='left')
         self.button(actions,'Refresh index',self.ingest,side='left',padx=5)
         self.button(actions,'Index status',self.index_status,side='left')
+        self.button(actions,'Metadata review…',self.launch_metadata_review,side='left',padx=5)
         ttk.Label(actions,text='Changes apply on the next operation.').pack(side='right',padx=8)
         model_actions=ttk.Frame(model_page);model_actions.pack(fill='x',pady=8)
         self.button(model_actions,'Load & test model',self.model_check,side='left')
@@ -243,7 +247,7 @@ class App:
 
     def search_help(self):
         messagebox.showinfo('Search input',
-            'Simple: words are ANDed; use "quoted phrases". ABC-123 is safe. Unmatched quotes report an error.\n\nAdvanced FTS5: use AND, OR, binary NOT, prefixes and NEAR.\nNEAR(export control, 5)\nNEAR("critical minerals" "supply chain", 10)\nNEAR("ABC-123" approval, 6)\n\nNEAR is unordered within an indexed passage. Hyphenated identifiers may also match spacing variants.\n\nEnter searches the library. Ctrl+Enter asks the model.',parent=self.root)
+            'Simple mode:\nexport control — both words\n"export control" — one phrase\nABC-123 — safe identifier input\n\nAdvanced FTS5 mode:\nexport OR sanction — either term\nexport NOT draft — exclude draft\n"critical minerals" AND Australia — phrase plus word\nNEAR("critical minerals" "supply chain", 10) — phrases near each other\nregulat* — prefix matching\n\nNEAR is unordered within an indexed passage. Hyphenated identifiers may also match spacing variants. Close all quotation marks.\n\nDate filters and reranking are separate controls. Use the Ask tab for natural-language questions.',parent=self.root)
 
     def toggle_filters(self):
         if self.filters_visible.get():self.filter_panel.grid()
@@ -254,103 +258,58 @@ class App:
         self.effort.set('legacy' if self.legacy_policy.get() else modes[max(0,min(2,round(self.effort_level.get())))])
 
     def build_search(self):
-        self.search_tab.columnconfigure(0,weight=1);self.search_tab.rowconfigure(2,weight=1)
-        query=ttk.LabelFrame(self.search_tab,text='Search your library',padding=10)
-        query.grid(row=0,column=0,sticky='ew',pady=(0,8));query.columnconfigure(0,weight=1)
-        self.question=tk.StringVar()
-        self.question_entry=ttk.Entry(query,textvariable=self.question,font=('Segoe UI',11))
-        self.question_entry.grid(row=0,column=0,sticky='ew',ipady=4)
-        self.question_entry.bind('<Return>',lambda event:self.search() if not self.busy else None)
-        self.question_entry.bind('<Control-Return>',lambda event:self.question_model() if not self.busy else None)
-        self.relevance_question=tk.StringVar()
-        ttk.Label(query,text='Rank search results for question (optional)').grid(row=3,column=0,sticky='w',pady=(8,0))
-        ttk.Entry(query,textvariable=self.relevance_question).grid(row=4,column=0,sticky='ew')
-        steer_row=ttk.Frame(query);steer_row.grid(row=5,column=0,sticky='ew',pady=(6,0));steer_row.columnconfigure(0,weight=1)
-        self.steering_text=tk.StringVar();self.steering_status=tk.StringVar(value='Steering applies on the next model turn.')
-        ttk.Entry(steer_row,textvariable=self.steering_text).grid(row=0,column=0,sticky='ew')
-        ttk.Button(steer_row,text='Queue instruction',command=self.queue_steering).grid(row=0,column=1,padx=6)
-        ttk.Label(steer_row,textvariable=self.steering_status).grid(row=1,column=0,columnspan=2,sticky='w')
-        row=ttk.Frame(query);row.grid(row=1,column=0,sticky='ew',pady=(8,0))
-        self.button(row,'Search library',self.search,side='left')
-        self.button(row,'Ask local model',self.question_model,side='left',padx=6)
-        self.button(row,'Browse sources',self.browse,side='left')
-        self.stop=ttk.Button(row,text='Stop operation',command=self.cancel.set,state='disabled');self.stop.pack(side='right')
-        self.filters_visible=tk.BooleanVar(value=False)
-        ttk.Checkbutton(row,text='Search options',variable=self.filters_visible,command=self.toggle_filters).pack(side='right',padx=10)
-        effort_row=ttk.Frame(query);effort_row.grid(row=2,column=0,sticky='ew',pady=(8,0))
-        configured=self.raw.get('agent_options',{}).get('effort','legacy');modes=('quick','balanced','thorough')
-        self.effort=tk.StringVar(value=configured);self.effort_level=tk.DoubleVar(value=modes.index(configured) if configured in modes else 1)
-        self.legacy_policy=tk.BooleanVar(value=configured=='legacy')
-        ttk.Label(effort_row,text='Answer effort').pack(side='left')
-        slider=ttk.Frame(effort_row);slider.pack(side='left',padx=10)
-        scale=ttk.Scale(slider,from_=0,to=2,variable=self.effort_level,command=self.effort_changed,length=210)
-        scale.grid(row=0,column=0,columnspan=3,sticky='ew')
-        scale.bind('<ButtonRelease-1>',lambda event:scale.set(round(self.effort_level.get())))
-        for i,label in enumerate(('Quick','Balanced','Thorough')):
-            slider.columnconfigure(i,weight=1);ttk.Label(slider,text=label).grid(row=1,column=i)
-        ttk.Label(effort_row,textvariable=self.effort,width=10).pack(side='left',padx=4)
-        ttk.Checkbutton(effort_row,text='Legacy policy (comparison)',variable=self.legacy_policy,command=self.effort_changed).pack(side='left')
+        from .gui_views import build_views
+        build_views(self)
 
-        self.filter_panel=ttk.LabelFrame(self.search_tab,text='Search options — library searches',padding=10)
-        self.filter_panel.grid(row=1,column=0,sticky='ew',pady=(0,8));self.filter_panel.columnconfigure(5,weight=1)
-        self.search_input_mode=tk.StringVar(value=self.raw.get('search_input_mode','simple'))
-        ttk.Label(self.filter_panel,text='Input').grid(row=0,column=0,sticky='w')
-        ttk.Combobox(self.filter_panel,textvariable=self.search_input_mode,values=('simple','advanced'),state='readonly',width=10).grid(row=0,column=1,sticky='w',padx=(6,16))
-        ttk.Button(self.filter_panel,text='Search help',command=self.search_help).grid(row=0,column=2,sticky='w')
-        self.exact_count=tk.BooleanVar(value=False)
-        ttk.Checkbutton(self.filter_panel,text='Count all matches',variable=self.exact_count).grid(row=0,column=3,columnspan=3,sticky='w',padx=12)
-        self.date_field=tk.StringVar(value='added_at');self.after=tk.StringVar();self.before=tk.StringVar();self.sort=tk.StringVar(value='relevance')
-        ttk.Label(self.filter_panel,text='Date type').grid(row=1,column=0,sticky='w',pady=(8,0))
-        ttk.Combobox(self.filter_panel,textvariable=self.date_field,values=('added_at','modified_at','published_at'),width=13,state='readonly').grid(row=1,column=1,sticky='w',padx=(6,16),pady=(8,0))
-        for column,label,var in ((2,'After',self.after),(4,'Before',self.before)):
-            ttk.Label(self.filter_panel,text=label).grid(row=1,column=column,sticky='w',pady=(8,0))
-            ttk.Entry(self.filter_panel,textvariable=var,width=12).grid(row=1,column=column+1,sticky='w',padx=6,pady=(8,0))
-        ttk.Label(self.filter_panel,text='Order').grid(row=2,column=0,sticky='w',pady=(8,0))
-        ttk.Combobox(self.filter_panel,textvariable=self.sort,values=('relevance','newest'),width=13,state='readonly').grid(row=2,column=1,sticky='w',padx=(6,16),pady=(8,0))
-        ttk.Label(self.filter_panel,text='YYYY-MM-DD · added/captured dates do not establish publication.',wraplength=470).grid(row=2,column=2,columnspan=4,sticky='w',pady=(8,0))
-        self.filter_panel.grid_remove()
+    def new_conversation(self):
+        if self.busy:return
+        self.conversation=[];self.turns=[];self.conversation_turn=0;self.question_serial+=1;self.question.set('');self.stream_action='';self.stream_thinking=''
+        self.conversation_evidence=None
+        self.chat.configure(state='normal');self.chat.delete('1.0','end');self.chat.configure(state='disabled')
+        for tag in self.chat.tag_names():
+            if tag.startswith('chat-'):self.chat.tag_delete(tag)
+        self.trace_selector.configure(values=('Current turn',));self.trace_choice.set('Current turn')
+        self.chat_status.set('Ask a question, then follow up in the same conversation.');self.reading_status.set('');self.reading_titles=[]
+        self.select_trace()
 
-        self.workspace=ttk.Panedwindow(self.search_tab,orient='horizontal')
-        self.workspace.grid(row=2,column=0,sticky='nsew')
-        results=ttk.LabelFrame(self.workspace,text='Library results',padding=8)
-        results.columnconfigure(0,weight=1);results.rowconfigure(1,weight=1)
-        self.result_summary=tk.StringVar(value='Search or browse to see sources here.')
-        summary_label=ttk.Label(results,textvariable=self.result_summary,wraplength=340)
-        summary_label.grid(row=0,column=0,sticky='w',pady=(0,6))
-        results.bind('<Configure>',lambda event:summary_label.configure(wraplength=max(150,event.width-20)))
-        table=ttk.Frame(results);table.grid(row=1,column=0,sticky='nsew');table.columnconfigure(0,weight=1);table.rowconfigure(0,weight=1)
-        self.tree=ttk.Treeview(table,columns=('title','copies','date','preview'),displaycolumns=('title','copies','date'),show='headings',height=8,selectmode='browse')
-        for name,label,width in [('title','Source',210),('copies','Copies',50),('date','Date',110),('preview','Text',260)]:
-            self.tree.heading(name,text=label);self.tree.column(name,width=width,minwidth=45,stretch=name=='title')
-        self.tree.grid(row=0,column=0,sticky='nsew')
-        scroll=ttk.Scrollbar(table,orient='vertical',command=self.tree.yview);scroll.grid(row=0,column=1,sticky='ns')
-        across=ttk.Scrollbar(table,orient='horizontal',command=self.tree.xview);across.grid(row=1,column=0,sticky='ew')
-        self.tree.configure(yscrollcommand=scroll.set,xscrollcommand=across.set)
-        self.tree.bind('<<TreeviewSelect>>',self.preview_result);self.tree.bind('<Double-1>',self.expand)
-        ttk.Label(results,text='Select to preview · double-click for context',wraplength=340).grid(row=2,column=0,sticky='w',pady=6)
-        pages=ttk.Frame(results);pages.grid(row=3,column=0,sticky='ew')
-        self.button(pages,'More results',self.more_results,side='left')
-        self.button(pages,'Read source',self.read_document,side='left',padx=4)
-        self.button(pages,'Next page',lambda:self.read_document(next_page=True),side='left')
-        self.detail_tabs=ttk.Notebook(self.workspace)
-        self.answer_tab=ttk.Frame(self.detail_tabs,padding=6);activity=ttk.Frame(self.detail_tabs,padding=6);timing=ttk.Frame(self.detail_tabs,padding=6)
-        self.detail_tabs.add(self.answer_tab,text='Answer / source');self.detail_tabs.add(activity,text='Activity');self.detail_tabs.add(timing,text='Timing')
-        self.output=ScrolledText(self.answer_tab,wrap='word',height=8,width=30,font=('Segoe UI',10),padx=10,pady=10,relief='flat')
-        self.output.pack(fill='both',expand=True)
-        activity_label=ttk.Label(activity,text='Live model output and evidence checklist · unvalidated',wraplength=500)
-        activity_label.pack(anchor='w',pady=(0,6))
-        activity.bind('<Configure>',lambda event:activity_label.configure(wraplength=max(150,event.width-16)))
-        self.live=ScrolledText(activity,wrap='word',height=8,width=30,font=('Consolas',9),padx=8,pady=8,state='disabled',relief='flat');self.live.pack(fill='both',expand=True)
-        self.thinking_tab=ttk.Frame(self.detail_tabs,padding=6);self.detail_tabs.add(self.thinking_tab,text='Thinking')
-        self.thinking_live=ScrolledText(self.thinking_tab,wrap='word',height=8,width=30,font=('Consolas',9),padx=8,pady=8,state='disabled',relief='flat');self.thinking_live.pack(fill='both',expand=True)
-        activity_label.configure(text='Tool actions, steering and evidence checklist · unvalidated')
-        self.timing_details=ScrolledText(timing,wrap='word',height=8,width=30,font=('Consolas',9),padx=8,pady=8,state='disabled',relief='flat');self.timing_details.pack(fill='both',expand=True)
-        self.workspace.add(results,weight=2);self.workspace.add(self.detail_tabs,weight=3)
-        self.metrics=tk.StringVar();self.metrics_label=ttk.Label(self.search_tab,textvariable=self.metrics,wraplength=1000)
-        self.metrics_label.grid(row=3,column=0,sticky='ew',pady=(6,3))
-        self.ingest_bar=ttk.Progressbar(self.search_tab,mode='determinate',maximum=1,value=0)
-        self.ingest_bar.grid(row=4,column=0,sticky='ew',pady=(2,0))
-        self.show('Ask a question or search your library.\n\nAnswers, source passages and clickable citations appear here. Use Activity to follow progress and Timing for the detailed breakdown.')
+    def append_chat(self,speaker,text,sources=()):
+        self.chat.configure(state='normal');self.chat.insert('end',speaker+'\n','speaker');self.chat.insert('end',text+'\n')
+        self.source_links(sources,self.chat,prefix='chat-'+str(self.question_serial)+'-source-')
+        self.chat.insert('end','\n')
+        if len(self.chat.get('1.0','end-1c'))>200000:self.chat.delete('1.0','end-200000c')
+        for tag in self.chat.tag_names():
+            if tag.startswith('chat-') and not self.chat.tag_ranges(tag):self.chat.tag_delete(tag)
+        self.chat.see('end');self.chat.configure(state='disabled')
+
+    def show_trace(self):
+        self.trace_window.deiconify();self.trace_window.lift()
+
+    @staticmethod
+    def replace_text(widget,text):
+        widget.configure(state='normal');widget.delete('1.0','end');widget.insert('end',text);widget.configure(state='disabled')
+
+    def select_trace(self,event=None):
+        choice=self.trace_choice.get()
+        if choice=='Current turn':
+            self.replace_text(self.live,self.stream_action);self.replace_text(self.thinking_live,self.stream_thinking)
+            return
+        selected=next((turn for turn in self.turns if turn['label']==choice),None)
+        if not selected:return
+        result=selected['result'];thinking=[]
+        from .display_stream import DisplayStream
+        for index,check in enumerate(result.get('context_checks',[]),1):
+            stream=DisplayStream(check.get('thinking',False))
+            pieces=stream.feed(check.get('model_response',''),final=True)
+            reasoning=''.join(text for channel,text in pieces if channel=='thinking')
+            if reasoning:thinking.append('Round '+str(index)+'\n'+reasoning)
+        self.replace_text(self.live,json.dumps({'question':selected['question'],'turns':result.get('trace',[]),'model_rounds':result.get('context_checks',[])},ensure_ascii=False,indent=2))
+        self.replace_text(self.thinking_live,'\n\n'.join(thinking) or 'No separate thinking was emitted.')
+        self.replace_text(self.timing_details,format_timing(result['gui_timing']) if result.get('gui_timing') else json.dumps(result.get('timings',{}),indent=2))
+
+    def launch_metadata_review(self):
+        if not self.save():return
+        import subprocess,sys
+        subprocess.Popen([sys.executable,'-m','local_search.metadata_gui','--config',str(self.path)],cwd=str(Path(__file__).resolve().parents[1]),creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
 
     def preview_result(self,event=None):
         if self.busy:return
@@ -378,19 +337,20 @@ class App:
         self.tooltip.geometry(f'+{event.x_root+12}+{event.y_root+16}')
         ttk.Label(self.tooltip,text=text,padding=8,wraplength=850,relief='solid').pack()
 
-    def source_links(self,sources):
+    def source_links(self,sources,widget=None,prefix='source-'):
         if not sources:return
-        self.output.insert('end','\n\nSources (hover for title, path and dates):\n')
+        widget=widget or self.output
+        widget.insert('end','\n\nSources (hover for title, path and dates):\n')
         displayed=set()
         for source in sources:
             if source['id'] in displayed:continue
             displayed.add(source['id'])
-            tag='source-'+str(source['id']);label=f"[{source['id']}] {source['title']}"+(f" · PDF page {source['page']}" if type(source.get('page')) is int else '')
-            self.output.insert('end',label+'\n',tag);self.output.tag_configure(tag,foreground='#145da0',underline=True)
+            tag=prefix+str(source['id']);label=f"[{source['id']}] {source['title']}"+(f" · PDF page {source['page']}" if type(source.get('page')) is int else '')
+            widget.insert('end',label+'\n',tag);widget.tag_configure(tag,foreground='#145da0',underline=True)
             detail='\n'.join([source['title'],source['locator']]+[f'{k}: {source[k]}' for k in ('added_at','modified_at','published_at') if source.get(k)])
-            self.output.tag_bind(tag,'<Enter>',lambda e,t=detail:(self.output.configure(cursor='hand2'),self.hint(e,t)))
-            self.output.tag_bind(tag,'<Leave>',lambda e:(self.output.configure(cursor='xterm'),self.hide_hint()))
-            self.output.tag_bind(tag,'<Button-1>',lambda e,s=dict(source):self.open_link(s))
+            widget.tag_bind(tag,'<Enter>',lambda e,t=detail,w=widget:(w.configure(cursor='hand2'),self.hint(e,t)))
+            widget.tag_bind(tag,'<Leave>',lambda e,w=widget:(w.configure(cursor='xterm'),self.hide_hint()))
+            widget.tag_bind(tag,'<Button-1>',lambda e,s=dict(source):self.open_link(s))
 
     def open_link(self,source):
         self.hide_hint()
@@ -466,6 +426,7 @@ class App:
             return self.manager.adopt_published(preserve_pending=True)
         def show(result):
             self.hits={};self.tree.delete(*self.tree.get_children());self.next_offset=None;self.open_doc=None;self.next_char=None
+            self.new_conversation()
             self.display_report(result)
         self.submit(work,show)
 
@@ -526,7 +487,15 @@ class App:
                 from .display_stream import DisplayStream
                 self.display_stream=DisplayStream(event.get('thinking',False))
                 text.append(f"\n--- Model round {event['round']} ---\n");thought.append(f"\n--- Model round {event['round']} ---\n")
-            elif event['type']=='phase':self.status.set(event['text'])
+            elif event['type']=='phase':
+                if self.ask_active:
+                    label='Selecting reports…' if event['text'].startswith('Tool: search') or event['text'].startswith('Tool: catalog') else 'Reading selected reports…' if event['text'].startswith('Tool: context') or event['text'].startswith('Tool: document') else 'Writing answer…' if 'Finalising' in event['text'] else 'Thinking…' if 'prompt' in event['text'].lower() or event['text'].startswith('Tool:') else event['text']
+                    self.chat_status.set(label);self.status.set(label)
+                else:self.status.set(event['text'])
+            elif event['type']=='activity':
+                if event['phase']=='selecting':self.chat_status.set('Selecting reports…');self.reading_titles=[];self.reading_status.set('')
+                elif event['phase']=='thinking':self.chat_status.set('Thinking…')
+                elif event['phase']=='reading':self.reading_titles=event.get('titles',[]);self.reading_index=0;self.next_title_at=0;self.chat_status.set('Reading selected reports…')
             elif event['type']=='steering':
                 text.append('\nInstruction '+str(event['id'])+' '+event['status']+': '+event['text']+'\n')
                 self.steering_status.set('Instruction '+str(event['id'])+' '+event['status']+(f" on round {event['applied_round']}" if event.get('applied_round') else ''))
@@ -536,14 +505,21 @@ class App:
             elif event['type']=='coverage':
                 text.append('\nEvidence checklist:\n'+'\n'.join(item['status']+': '+item['need'] for item in event['items'])+'\n')
         if text:
+            self.stream_action=(self.stream_action+''.join(text))[-32000:]
+        if text and self.trace_choice.get()=='Current turn':
             self.live.configure(state='normal');self.live.insert('end',''.join(text))
             if int(self.live.index('end-1c').split('.')[0])>1000:self.live.delete('1.0','end-1000lines')
             if len(self.live.get('1.0','end-1c'))>32000:self.live.delete('1.0','end-32000c')
             self.live.see('end');self.live.configure(state='disabled')
         if thought:
+            self.stream_thinking=(self.stream_thinking+''.join(thought))[-32000:]
+        if thought and self.trace_choice.get()=='Current turn':
             self.thinking_live.configure(state='normal');self.thinking_live.insert('end',''.join(thought))
             if len(self.thinking_live.get('1.0','end-1c'))>32000:self.thinking_live.delete('1.0','end-32000c')
             self.thinking_live.see('end');self.thinking_live.configure(state='disabled')
+        if self.ask_active and self.reading_titles and time.monotonic()>=self.next_title_at:
+            self.reading_status.set('Reading “'+self.reading_titles[self.reading_index%len(self.reading_titles)]+'”…')
+            self.reading_index+=1;self.next_title_at=time.monotonic()+1.6
         try:
             result,error,callback=self.results.get_nowait();self.busy=False
             self.active_steering=None
@@ -552,7 +528,10 @@ class App:
             if self.closing:self.root.destroy();return
             for c in self.controls:c.configure(state='normal')
             self.stop.configure(state='disabled')
-            if error:self.status.set(error);messagebox.showerror('Operation failed',error,parent=self.root)
+            if error:
+                if self.ask_active:
+                    self.ask_active=False;self.chat_status.set('Could not complete this answer.');self.reading_titles=[];self.reading_status.set('');self.append_chat('Assistant','Could not complete this answer: '+error)
+                self.status.set(error);messagebox.showerror('Operation failed',error,parent=self.root)
             else:
                 self.status.set('Ready')
                 if callback:callback(result)
@@ -614,7 +593,7 @@ class App:
 
     def search(self,offset=0):
         if not self.save():return
-        config=self.cfg();query=self.question.get();options=dict(after=self.after.get() or None,before=self.before.get() or None,date_field=self.date_field.get(),sort=self.sort.get(),limit=20,offset=offset,exact_count=self.exact_count.get(),input_mode=self.search_input_mode.get(),_relevance_question=self.relevance_question.get().strip())
+        config=self.cfg();query=self.search_query.get();options=dict(after=self.after.get() or None,before=self.before.get() or None,date_field=self.date_field.get(),sort=self.sort.get(),limit=20,offset=offset,exact_count=self.exact_count.get(),input_mode=self.search_input_mode.get(),_relevance_question=self.relevance_question.get().strip())
         if offset and getattr(self,'search_request',None):
             query,options=self.search_request;options=dict(options,offset=offset)
         else:self.search_request=(query,dict(options))
@@ -746,10 +725,15 @@ class App:
         self.submit(work,self.display_report,inference=True)
 
     def question_model(self):
+        if self.busy:return
         clicked=time.perf_counter()
         if not self.save():return
         config=self.cfg();question=self.question.get().strip()
         if not question:return
+        if self.conversation_library is not None and self.conversation_library!=config['database']:self.new_conversation()
+        self.conversation_library=config['database'];prior=list(self.conversation[-40:]);prior_evidence=self.conversation_evidence;self.conversation_turn+=1;turn_number=self.conversation_turn
+        self.conversation.append({'role':'user','content':question});self.question.set('');self.append_chat('You',question);self.tabs.select(self.ask_tab)
+        self.ask_active=True;self.reading_titles=[];self.reading_status.set('');self.chat_status.set('Thinking…');self.stream_action='';self.stream_thinking='';self.trace_choice.set('Current turn')
         self.question_serial+=1;question_serial=self.question_serial
         from .steering import SteeringQueue
         steering=SteeringQueue();self.active_steering=steering;self.steering_status.set('Question running; instructions can be queued.')
@@ -764,23 +748,29 @@ class App:
             clock['load_seconds']=time.perf_counter()-started
             started=time.perf_counter();library=self.get_library(config)
             clock['library_seconds']=time.perf_counter()-started
-            result=ask(library,model,question,on_event=self.emit,prompts_file=config.get('prompts_file'),reranker=self.loaded_reranker(config),note_tokens=config.get('agent_options',{}).get('note_tokens',6000),effort=config.get('agent_options',{}).get('effort','legacy'),steering=steering)
+            result=ask(library,model,question,on_event=self.emit,prompts_file=config.get('prompts_file'),reranker=self.loaded_reranker(config),note_tokens=config.get('agent_options',{}).get('note_tokens',6000),effort=config.get('agent_options',{}).get('effort','legacy'),steering=steering,conversation_history=prior,prior_evidence=prior_evidence)
             result['timings']['load_seconds']=clock['load_seconds']
             trace=library.path.parent/'last-gui-search.json';clock['trace']=trace
             with self.trace_lock:trace.write_text(json.dumps(result,ensure_ascii=False,indent=2),'utf-8')
             clock['worker_finished']=time.perf_counter()
             return result
         def show(result):
+            self.ask_active=False;self.reading_titles=[];self.reading_status.set('')
+            self.conversation_evidence=result.get('conversation_evidence')
             self.active_steering=None;self.steering_status.set('Question complete; see Activity for steering history.')
             render_started=time.perf_counter()
             display=result.get('answer') or result['status']
             if result.get('gaps'):display+='\n\nUnresolved points:\n'+'\n'.join('• '+gap for gap in result['gaps'])
-            self.show(display);self.source_links(result.get('sources',[]))
-            self.output.update_idletasks()
+            self.append_chat('Assistant',display,result.get('sources',[]));self.chat.update_idletasks()
+            refs=[{k:source.get(k) for k in ('id','title','doc_id')} for source in result.get('sources',[])]
+            self.conversation.append({'role':'assistant','content':'Previously cited reports (context only): '+json.dumps(refs,ensure_ascii=False)+'\nAnswer:\n'+display});self.conversation=self.conversation[-40:]
             completed=time.perf_counter()
             timing=complete_timing(result,clicked,submitted,clock['worker_started'],clock['worker_finished'],render_started,completed,clock['load_seconds'],clock['library_seconds'])
             result['gui_timing']=timing
-            self.timing_details.configure(state='normal');self.timing_details.delete('1.0','end');self.timing_details.insert('end',format_timing(timing));self.timing_details.configure(state='disabled')
+            if self.trace_choice.get()=='Current turn':self.replace_text(self.timing_details,format_timing(timing))
+            label='Turn '+str(turn_number)+': '+question[:60];self.turns.append({'label':label,'question':question,'result':result});self.turns=self.turns[-20:]
+            self.trace_selector.configure(values=['Current turn']+[turn['label'] for turn in self.turns])
+            self.chat_status.set(('Ready' if result.get('answer') else 'Stopped: '+result['status'])+f" · {timing['click_to_complete_seconds']:.1f}s")
             checks=result.get('context_checks',[])
             rates=[c['timings']['approx_decode_tokens_per_second'] for c in checks if c.get('timings',{}).get('approx_decode_tokens_per_second') is not None]
             label='Click → final answer complete' if result['status'] in ('answered','answered_with_gaps') else 'Click → stopped ('+result['status']+')'

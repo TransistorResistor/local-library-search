@@ -1,12 +1,22 @@
 # New question, search, viewer and library controls
 
+## Search and conversation
+
+The Search tab contains keyword/FTS5 search, optional question-based ranking, filters and the source reader. Search syntax opens a small reference with phrases, AND/OR/NOT, prefixes and NEAR examples.
+
+The Ask tab keeps a conversation: send a question, then follow up in the same view. New conversation clears its history and retained evidence. Switching libraries also clears it. Status shows Thinking, Selecting reports and cycling titles of reports actually selected by tools. These labels describe activity, not proof that a report has been understood.
+
+Details opens the tucked-away activity, thinking and timing views. Select Current turn or an earlier turn to inspect tool calls, rejections and generated responses.
+
+Follow-ups receive bounded conversation history and up to eight cited excerpts from the preceding answer, within a budget of 4,000 tokens or a quarter of the model context, whichever is smaller. Only excerpts still visible to the model at completion are eligible. Sources, indexed content and excerpt locations are checked again against the current library before reuse; changed or removed evidence is dropped. Retained excerpts survive checkpoints, but may be evicted under context pressure. These excerpts can support citations directly; older assistant text alone cannot. Unchanged passages do not establish that newer contradictory documents are absent: the model can still search for updates. Oversized excerpts are omitted rather than silently shortened.
+
 ## Steering an active question
 
 While Ask local model is running, enter a correction in the instruction box and click Queue instruction. Activity shows queued/applied status, and the question trace records the text, queue timestamp and applied round.
 
 Instructions join the next model request and persist through notebook checkpoints. They do not interrupt the generation currently running. A final answer is held back if an instruction arrived during its generation. At most two extra responses are allowed to handle such a late correction; if that allowance or the context limit is exhausted, the question is reported incomplete with its steering history retained. No accepted queued instruction is silently discarded. Instructions are scoped to one question, with a maximum of 12 instructions / 8,000 characters. After completion, start another question.
 
-The Thinking tab shows tagged/implicit model thinking separately from tool actions in Activity. Both are bounded, unvalidated displays; the full generated response still goes to the existing action parser. The display does not grant the model additional tools or context.
+Details → Thinking shows tagged/implicit model thinking separately from tool actions in Activity. Both are bounded, unvalidated live displays; saved turns retain the generated responses. The full generated response still goes to the existing action parser. The display does not grant the model additional tools or context.
 
 ## Keyword search with a relevance question
 
@@ -68,6 +78,6 @@ python -m local_search --config local-search.json library-adopt --preserve-local
 
 Plain `library-adopt` refuses pending local changes; `--preserve-local` explicitly saves them in the recovery backup before adopting the publication.
 
-Only one app/command owns a local working library at a time. A `.publish-lock` coordinates supported publishers; a crashed publisher may leave a lock. Verify no publisher is running and inspect sync status before manually removing a stale lock. Do not directly edit/open the published SQLite file while publishing. These mechanisms cannot detect every unrelated external writer. Real share locking/durability behaviour still requires testing on the actual destination.
+The main app and metadata extraction worker retain their existing ownership rules. The separate metadata review window can read and save findings while the main app is open. Shared access guards prevent migrations, restore and working-library replacement while review is active; close the review window before those operations. A `.publish-lock` coordinates supported publishers; a crashed publisher may leave a lock. Verify no publisher is running and inspect sync status before manually removing a stale lock. Do not directly edit/open the published SQLite file while publishing. These mechanisms cannot detect every unrelated external writer. Real share locking/durability behaviour still requires testing on the actual destination.
 
 The separate [metadata sidecar](METADATA_WORKFLOW.md) now provides migration, custom fields/prompts, random dry runs, bounded JSON recovery, review and resumable writes. Information-date resolution and mixed recency ranking remain planned. The clipper database remains separate.

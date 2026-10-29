@@ -18,6 +18,7 @@
 !/requirements-gguf.txt
 !/requirements-reranker.txt
 !/run-local-search.ps1
+!/run-metadata-review.ps1
 !/local_search/
 !/local_search/*.py
 __pycache__/

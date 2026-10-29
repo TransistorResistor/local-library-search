@@ -106,6 +106,16 @@ The desktop, normal CLI and metadata worker share a GGUF ownership lock to avoid
 
 ## Review and database tools
 
+Open the separate review window from the main app's Settings → Metadata review button, run `run-metadata-review.ps1`, or use:
+
+```text
+python -m local_search.metadata --config local-search.json gui
+```
+
+The window starts with `needs_review` findings. Select a report, inspect its proposed fields and supporting quotes, and edit values as needed. Lists and date intervals have structured editors. Save draft keeps the finding awaiting review; Accept finding validates and accepts it. Fields you edit become protected manual overrides on acceptance. Evidence, original excerpts, model attempts and the exact extraction prompt remain available alongside the fields. No model is loaded by this window.
+
+The review window can stay open alongside the main app. Saves use short transactions and reject findings changed elsewhere or based on changed/deleted sources. Close review windows before migrations, restores or replacing a working library. The database must already have its metadata migration applied; opening review does not migrate it or start extraction.
+
 ```text
 python -m local_search.metadata --config local-search.json jobs --status needs_review
 python -m local_search.metadata --config local-search.json review --job JOB_ID

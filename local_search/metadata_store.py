@@ -2,6 +2,7 @@
 import sqlite3
 import time
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from .metadata_profile import canonical,profile_hash,validate_profile
 
@@ -40,6 +41,11 @@ def inspect(db):
 def migrate(library,apply=False):
     preview=_migrate(library,False)
     if not apply or preview['metadata_schema']:return preview
+    from .library_guard import maintenance
+    with maintenance(library):return _migrate_exclusive(library)
+
+
+def _migrate_exclusive(library):
     db=library.db
     if db.in_transaction:raise ValueError('Finish the current transaction before metadata migration')
     # Retain an exclusive SQLite lock across backup and DDL, without backing up
@@ -150,7 +156,7 @@ def current_source(db,ident):
 
 def commit_result(library,job,result,profile):
     db=library.db
-    with db:
+    with nullcontext() if db.in_transaction else db:
         current=current_source(db,job['source_id'])
         if not current or current['source_uuid']!=job['source_uuid'] or current['text_hash']!=job['content_hash']:
             result['status']='stale'
@@ -184,6 +190,12 @@ def commit_result(library,job,result,profile):
 
 
 def restore(library,backup_path,apply=False):
+    if not apply:return _restore(library,backup_path,False)
+    from .library_guard import maintenance
+    with maintenance(library):return _restore(library,backup_path,True)
+
+
+def _restore(library,backup_path,apply=False):
     from .sqlite_paths import connect_readonly,network_path
     backup_path=Path(backup_path).resolve()
     if network_path(backup_path):raise ValueError('Copy the closed backup locally before restoring it')
