@@ -45,7 +45,9 @@
   },
   "agent_options": {
     "note_tokens": 6000,
-    "effort": "legacy"
+    "effort": "legacy",
+    "first_turn_json": false,
+    "repair_invalid_json": false
   },
   "search_input_mode": "simple",
   "library_sync": {"enabled": false, "auto_sync": false},

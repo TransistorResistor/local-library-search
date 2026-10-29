@@ -12,6 +12,12 @@ Follow-ups receive bounded conversation history and up to eight cited excerpts f
 
 ## Steering an active question
 
+Settings → Preferences offers two independent, opt-in Ask JSON controls. **Use non-thinking JSON for the first Ask response** constrains only the first model response of each submitted question (including follow-ups) to the supported action schema. It may select a search, another tool or an answer. All later normal responses resume the configured Thinking setting.
+
+**Repair invalid Ask JSON** allows at most two additional formatting calls per submitted question. These calls temporarily disable thinking, constrain JSON and receive only the candidate action, schema and formatting error, without the original question, retrieved documents or earlier reasoning. They are instructed to preserve the intended action and answer rather than answer the question again; exact preservation cannot be proven for malformed input. Repaired returns still pass the ordinary tool, citation, coverage, finalisation and steering checks. Invalid citation IDs or unresolved evidence needs use normal model retries instead of formatting repair. Output cutoffs and cancellation are not treated as repairable complete answers. Repair attempts, original/repaired text, constraint status and timings are recorded in Details; the extra calls count in generation timing. Failed repairs remain rejected, and normal attempts retain the existing round limit.
+
+The configuration keys are `agent_options.first_turn_json` and `agent_options.repair_invalid_json`, both false by default. The CLI Ask command honours the same settings. Metadata extraction is unchanged by these options.
+
 While Ask local model is running, enter a correction in the instruction box and click Queue instruction. Activity shows queued/applied status, and the question trace records the text, queue timestamp and applied round.
 
 Instructions join the next model request and persist through notebook checkpoints. They do not interrupt the generation currently running. A final answer is held back if an instruction arrived during its generation. At most two extra responses are allowed to handle such a late correction; if that allowance or the context limit is exhausted, the question is reported incomplete with its steering history retained. No accepted queued instruction is silently discarded. Instructions are scoped to one question, with a maximum of 12 instructions / 8,000 characters. After completion, start another question.

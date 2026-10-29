@@ -34,6 +34,8 @@ def configuration(path):
     note_tokens=data.get('agent_options',{}).get('note_tokens',6000)
     if type(note_tokens) is not int or not 64<=note_tokens<=32768:raise ValueError('Notebook budget must be 64..32768 tokens')
     if data.get('agent_options',{}).get('effort','legacy') not in ('legacy','quick','balanced','thorough'):raise ValueError('Invalid answer effort mode')
+    for key in ('first_turn_json','repair_invalid_json'):
+        if type(data.get('agent_options',{}).get(key,False)) is not bool:raise ValueError(key+' must be true or false')
     if data.get('search_input_mode','simple') not in ('simple','advanced'):raise ValueError('Invalid search input mode')
     if data.get('reranker',{}).get('model_dir'):
         data['reranker']['model_dir']=str((path.parent/Path(data['reranker']['model_dir']).expanduser()).resolve())
@@ -129,7 +131,7 @@ def main():
                     if args.max_rounds is not None and not 1<=args.max_rounds<=100:raise ValueError('max-rounds must be 1..100')
                     rerank_config=RerankConfig(**config.get('reranker',{}))
                     reranker=Reranker(rerank_config) if rerank_config.enabled else None
-                    try:result=ask_library(library,model,args.question,max_rounds=args.max_rounds,prompts_file=config.get('prompts_file'),reranker=reranker,note_tokens=args.note_tokens if args.note_tokens is not None else config.get('agent_options',{}).get('note_tokens',6000),effort=args.effort or config.get('agent_options',{}).get('effort','legacy'))
+                    try:result=ask_library(library,model,args.question,max_rounds=args.max_rounds,prompts_file=config.get('prompts_file'),reranker=reranker,note_tokens=args.note_tokens if args.note_tokens is not None else config.get('agent_options',{}).get('note_tokens',6000),effort=args.effort or config.get('agent_options',{}).get('effort','legacy'),first_turn_json=config.get('agent_options',{}).get('first_turn_json',False),repair_invalid_json=config.get('agent_options',{}).get('repair_invalid_json',False))
                     finally:
                         if reranker:reranker.close()
                     if args.trace:

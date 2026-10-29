@@ -121,6 +121,9 @@ class App:
         ttk.Checkbutton(prefs,text='Open PDFs at known cited page',variable=self.vars['pdf_page_enabled']).grid(row=3,column=0,sticky='w')
         ttk.Combobox(prefs,textvariable=self.vars['pdf_viewer'],values=('acrobat','chrome'),state='readonly').grid(row=3,column=1,sticky='ew',padx=8)
         self.entry(prefs,4,'Viewer executable (blank = auto-detect)','pdf_executable',viewer.get('executable',''),'exe')
+        for row,key,label in [(5,'first_turn_json','Use non-thinking JSON for the first Ask response'),(6,'repair_invalid_json','Repair invalid Ask JSON (up to two formatting calls)')]:
+            self.vars[key]=tk.BooleanVar(value=self.raw.get('agent_options',{}).get(key,False))
+            ttk.Checkbutton(prefs,text=label,variable=self.vars[key]).grid(row=row,column=0,columnspan=3,sticky='w')
         ttk.Label(preferences,text='Notebook space is part of the model context. Prompt edits apply on the next question.',wraplength=760).pack(anchor='w',pady=12)
         ttk.Label(preferences,text=f'Settings file: {self.path}',wraplength=760).pack(anchor='w')
         source_box=ttk.Frame(library_page);source_box.pack(fill='both',expand=True,pady=8)
@@ -214,7 +217,7 @@ class App:
             data['database_options']={'cache_mb':cache_mb}
             note_tokens=int(self.vars['note_tokens'].get())
             if not 64<=note_tokens<=32768:raise ValueError('Notebook budget must be 64..32768 tokens.')
-            data['agent_options']={**self.raw.get('agent_options',{}),'note_tokens':note_tokens,'effort':self.effort.get()}
+            data['agent_options']={**self.raw.get('agent_options',{}),'note_tokens':note_tokens,'effort':self.effort.get(),**{key:self.vars[key].get() for key in ('first_turn_json','repair_invalid_json')}}
             data['search_input_mode']=self.search_input_mode.get()
             data['library_sync']={**data.get('library_sync',{}),'enabled':self.vars['managed_library'].get(),'auto_sync':self.vars['auto_sync'].get()}
             data['pdf_viewer']={'enabled':self.vars['pdf_page_enabled'].get(),'viewer':self.vars['pdf_viewer'].get(),'executable':self.vars['pdf_executable'].get().strip()}
@@ -748,7 +751,7 @@ class App:
             clock['load_seconds']=time.perf_counter()-started
             started=time.perf_counter();library=self.get_library(config)
             clock['library_seconds']=time.perf_counter()-started
-            result=ask(library,model,question,on_event=self.emit,prompts_file=config.get('prompts_file'),reranker=self.loaded_reranker(config),note_tokens=config.get('agent_options',{}).get('note_tokens',6000),effort=config.get('agent_options',{}).get('effort','legacy'),steering=steering,conversation_history=prior,prior_evidence=prior_evidence)
+            result=ask(library,model,question,on_event=self.emit,prompts_file=config.get('prompts_file'),reranker=self.loaded_reranker(config),note_tokens=config.get('agent_options',{}).get('note_tokens',6000),effort=config.get('agent_options',{}).get('effort','legacy'),steering=steering,conversation_history=prior,prior_evidence=prior_evidence,first_turn_json=config.get('agent_options',{}).get('first_turn_json',False),repair_invalid_json=config.get('agent_options',{}).get('repair_invalid_json',False))
             result['timings']['load_seconds']=clock['load_seconds']
             trace=library.path.parent/'last-gui-search.json';clock['trace']=trace
             with self.trace_lock:trace.write_text(json.dumps(result,ensure_ascii=False,indent=2),'utf-8')

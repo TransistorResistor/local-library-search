@@ -12,7 +12,8 @@ from .query import normalise_search
 def packed(value):return json.dumps(value,ensure_ascii=False,separators=(',',':'))
 
 
-def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,prompts_file=None,reranker=None,effort='legacy',steering=None,conversation_history=None,prior_evidence=None):
+def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,prompts_file=None,reranker=None,effort='legacy',steering=None,conversation_history=None,prior_evidence=None,first_turn_json=False,repair_invalid_json=False):
+    if type(first_turn_json) is not bool or type(repair_invalid_json) is not bool:raise ValueError("JSON options must be boolean")
     history=[]
     for item in (conversation_history or [])[-40:]:
         if not isinstance(item,dict) or item.get('role') not in ('user','assistant') or not isinstance(item.get('content'),str):raise ValueError('Conversation history must contain user/assistant text messages')
@@ -40,7 +41,7 @@ def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,pr
     try:
         from .conversation_evidence import restore,snapshot
         carried,dropped=restore(library,prior_evidence)
-        result=_ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages,searcher,effort,steering,history,carried)
+        result=_ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages,searcher,effort,steering,history,carried,first_turn_json,repair_invalid_json)
         result['conversation_evidence']=snapshot(library,result.pop('_carry_results',[]))
         result['previous_evidence']={'revalidated':len(carried),'dropped':dropped}
         if hasattr(model,'diagnostics'):result['model_diagnostics']=model.diagnostics()
@@ -75,11 +76,12 @@ def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,pr
     return result
 
 
-def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages,searcher,effort,steering=None,history=None,carried=None):
+def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages,searcher,effort,steering=None,history=None,carried=None,first_turn_json=False,repair_invalid_json=False):
     conversation=list(history or []);history_trimmed=0;base_relevance=searcher.question if searcher else question
     recent=[];notes={};seen={};exposed=set();serial=0;trace=[];checks=[];evictions=0
     coverage=[];retrieval=RetrievalProgress();policy_events=[];finalising=False;instructions=[];steering_retry=False
-    visible=set();prior_pool={}
+    visible=set();prior_pool={};repairs=0
+    from .action_format import action_schema,constrained,parse_format,repair_messages
     for result in carried or []:
         serial+=1;seen[serial]=result;prior_pool[serial]=result;entry={'evidence_id':serial,'tool':'previous_turn','result':result};trace.append(dict(entry,round=0,status='revalidated'))
     def notebook(saved=None):
@@ -102,6 +104,7 @@ def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,st
                 if model.count([{'role':'user','content':packed(retained+[fragment])}])>min(4000,model.context//4):continue
                 retained.append(fragment);identities.add(identity)
                 if len(retained)>=8:break
+        result['json_options']={'first_turn_json':first_turn_json,'repair_invalid_json':repair_invalid_json,'repair_calls':repairs}
         result['_carry_results']=retained
         return dict(result,notebook=notebook(),effort=effort,response_budget=max_rounds,coverage=coverage,policy_events=policy_events,conversation_messages_omitted=history_trimmed)
     def messages(saved=None,history=None,checklist=None):
@@ -109,6 +112,7 @@ def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,st
         history=recent if history is None else history
         checklist=coverage if checklist is None else checklist
         payload={'saved_evidence':saved,'notebook':notebook(saved),'recent_results':history,'evicted_results':evictions}
+        if first_turn_json and not checks:payload['output_schema']=action_schema()
         existing=set(saved)|{entry['evidence_id'] for entry in history}
         if prior_pool:payload['previous_turn_evidence']={ident:value for ident,value in prior_pool.items() if ident not in existing}
         if instructions:payload['user_steering']=[i['text'] for i in instructions]
@@ -149,15 +153,15 @@ def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,st
         exposed.update(entry['evidence_id'] for entry in recent)
         exposed.update(notes)
         exposed.update(prior_pool)
-        if on_event:on_event({'type':'round','round':step+1,'thinking':getattr(model,'thinking',False)})
+        if on_event:on_event({'type':'round','round':step+1,'thinking':False if first_turn_json and step==0 else getattr(model,'thinking',False)})
         if on_event:on_event({'type':'activity','phase':'thinking'})
         if finalising:
             policy_events.append({'round':step+1,'reason':'reserved_final_response'})
             if on_event:on_event({'type':'phase','text':'Finalising answer from retrieved evidence'})
         model_started=time.perf_counter()
-        response=model.complete(prompt,on_event=on_event) if on_event else model.complete(prompt)
+        response=constrained(model,prompt,action_schema(),on_event) if first_turn_json and step==0 else model.complete(prompt,on_event=on_event) if on_event else model.complete(prompt)
         stages['model_seconds']+=time.perf_counter()-model_started
-        checks.append({'reserved_total':response['reserved_total'],'usage':response.get('usage',{}),'timings':response.get('timings',{}),'finish_reason':response['choices'][0].get('finish_reason'),'model_response':response['choices'][0]['text'],'thinking':getattr(model,'thinking',False)})
+        checks.append({'reserved_total':response['reserved_total'],'usage':response.get('usage',{}),'timings':response.get('timings',{}),'finish_reason':response['choices'][0].get('finish_reason'),'model_response':response['choices'][0]['text'],'thinking':False if first_turn_json and step==0 else getattr(model,'thinking',False),'kind':'first_json' if first_turn_json and step==0 else 'normal','json_schema_constrained':response.get('json_schema_constrained')})
         if getattr(model,'cancel_event',None) is not None and model.cancel_event.is_set():
             return finish(status='cancelled',answer=None,trace=trace,context_checks=checks)
         if response['choices'][0].get('finish_reason')=='length':
@@ -166,7 +170,32 @@ def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,st
             return finish(status='output_budget_exhausted' if effort=='legacy' else 'incomplete_output',stop_reason='output_budget_exhausted',answer=None,trace=trace,context_checks=checks)
         name='invalid';action={};submitted=None;tool_started=None;rejection=None;stage='parse'
         try:
-            action=parse_action(response['choices'][0]['text']);submitted=dict(action)
+            while True:
+                try:
+                    action=parse_format(response['choices'][0]['text']) if repair_invalid_json else parse_action(response['choices'][0]['text']);break
+                except ValueError as error:
+                    if not repair_invalid_json or repairs>=2:raise
+                    if getattr(model,'cancel_event',None) is not None and model.cancel_event.is_set():
+                        return finish(status='cancelled',answer=None,trace=trace,context_checks=checks)
+                    candidate=response['choices'][0]['text'];repairs+=1
+                    repair={'round':step+1,'tool':'json_repair','attempt':repairs,'status':'started','model_response':candidate,'rejection':{'stage':'parse','error_type':type(error).__name__,'reason':str(error)}}
+                    trace.append(repair)
+                    if on_event:
+                        on_event({'type':'phase','text':'Repairing JSON format'})
+                        on_event({'type':'round','round':step+1,'thinking':False})
+                    repair_started=time.perf_counter()
+                    try:
+                        response=constrained(model,repair_messages(candidate,error),action_schema(),on_event)
+                    except (ValueError,TypeError,KeyError) as failure:
+                        repair.update(status='rejected',error=str(failure));raise
+                    finally:stages['model_seconds']+=time.perf_counter()-repair_started
+                    checks.append({'reserved_total':response['reserved_total'],'usage':response.get('usage',{}),'timings':response.get('timings',{}),'finish_reason':response['choices'][0].get('finish_reason'),'model_response':response['choices'][0]['text'],'thinking':False,'kind':'json_repair','json_schema_constrained':response.get('json_schema_constrained')})
+                    repair.update(status='returned',repaired_response=response['choices'][0]['text'])
+                    if getattr(model,'cancel_event',None) is not None and model.cancel_event.is_set():
+                        return finish(status='cancelled',answer=None,trace=trace,context_checks=checks)
+                    if response['choices'][0].get('finish_reason')=='length':
+                        repair['status']='rejected';raise ValueError('JSON repair reached output limit; answer remains invalid')
+            submitted=dict(action)
             candidate=action.pop('action')
             if not isinstance(candidate,str):raise ValueError('action must be text')
             name=candidate
