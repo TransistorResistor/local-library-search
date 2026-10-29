@@ -6,6 +6,7 @@ import time
 import os
 import webbrowser
 import tempfile
+import re
 from urllib.parse import urlsplit
 from pathlib import Path
 import tkinter as tk
@@ -45,6 +46,7 @@ class App:
         self.next_sync_check=time.monotonic()+15
         self.conversation=[];self.turns=[];self.conversation_turn=0;self.ask_active=False;self.reading_titles=[];self.reading_index=0;self.next_title_at=0
         self.stream_action='';self.stream_thinking='';self.conversation_library=None;self.conversation_evidence=None
+        self.result_origin=None;self.result_versions={};self.last_attempt=None;self.transcript=[];self.session_id=None;self.conversation_omitted=0
         from .display_stream import DisplayStream
         self.display_stream=DisplayStream()
         self.events=queue.Queue(maxsize=256);self.library=None;self.library_key=None;self.tooltip=None
@@ -72,7 +74,13 @@ class App:
         self.setup.bind('<Configure>',lambda e:self.setup_canvas.configure(scrollregion=self.setup_canvas.bbox('all')))
         self.setup_canvas.bind('<Configure>',lambda e:self.setup_canvas.itemconfigure(window,width=e.width))
         self.tabs.add(self.search_tab,text='Search');self.tabs.add(self.ask_tab,text='Ask');self.tabs.add(self.setup_tab,text='Settings')
+        from .conversations import ConversationStore
+        self.conversation_store=ConversationStore(self.path)
         self.build_search();self.build_setup()
+        self.sync_summary=tk.StringVar(value='Library status will appear after the first operation.')
+        self.sync_label=ttk.Label(root,textvariable=self.sync_summary,padding=(14,2),wraplength=1050);self.sync_label.pack(side='bottom',fill='x',before=self.tabs)
+        self.active_library=tk.StringVar(value='Active library: '+str((self.path.parent/Path(self.raw['database'])).resolve()))
+        self.library_label=ttk.Label(root,textvariable=self.active_library,padding=(14,2),wraplength=1050);self.library_label.pack(side='bottom',fill='x',before=self.tabs)
         root.bind('<Configure>',self.resize_labels)
         if not self.path.exists():self.tabs.select(self.setup_tab)
         threading.Thread(target=self.worker,daemon=True).start();root.after(80,self.poll);root.after(1000,self.auto_refresh);root.protocol('WM_DELETE_WINDOW',self.close)
@@ -112,6 +120,8 @@ class App:
         self.button(sync_actions,'Load published copy',self.load_published,side='left',padx=5)
         ttk.Label(library_page,text='Network libraries use a local AppData copy. Existing remote libraries must be closed exports. Conflicting changes are retained for review.',wraplength=760).pack(anchor='w',pady=4)
         prefs=ttk.Frame(preferences);prefs.pack(fill='x');prefs.columnconfigure(1,weight=1)
+        self.vars['legacy_comparison']=self.legacy_policy
+        ttk.Checkbutton(prefs,text='Legacy answer policy (advanced comparison)',variable=self.legacy_policy,command=self.effort_changed).grid(row=7,column=0,columnspan=3,sticky='w')
         self.entry(prefs,0,'Notebook token limit (64–32768)','note_tokens',self.raw.get('agent_options',{}).get('note_tokens',6000))
         self.entry(prefs,1,'Prompt library (blank = bundled prompts.txt)','prompts_file',self.raw.get('prompts_file',''),'prompts')
         self.entry(prefs,2,'Database cache MiB (1–1024, per connection)','cache_mb',self.raw.get('database_options',{}).get('cache_mb',32))
@@ -235,8 +245,60 @@ class App:
             if any((self.path.parent/Path(s['path'])).resolve()==destination for s in self.sources):raise ValueError('Library database must differ from source databases.')
             self.path.parent.mkdir(parents=True,exist_ok=True)
             temp=self.path.with_suffix(self.path.suffix+'.tmp');temp.write_text(json.dumps(data,ensure_ascii=False,indent=2),'utf-8');temp.replace(self.path)
-            self.raw=data;self.status.set('Settings saved. Model changes take effect on the next model operation.');return True
+            old_origin=self.library_origin(self.raw)
+            if old_origin!=self.library_origin(data):self.save_conversation()
+            self.raw=data
+            if old_origin!=self.library_origin(data):self.invalidate_library_ui()
+            self.active_library.set('Active library: '+str(destination))
+            self.status.set('Settings saved. Model changes take effect on the next model operation.');return True
         except Exception as error:messagebox.showerror('Settings',str(error),parent=self.root);return False
+
+    def library_origin(self,config=None):
+        config=self.raw if config is None else config
+        sync=config.get('library_sync',{})
+        return (str((self.path.parent/Path(config['database'])).resolve()),bool(sync.get('enabled',False)),str(sync.get('local_root','')))
+
+    def ensure_active(self):
+        if self.busy:return False
+        if not self.path.exists():return self.save()
+        try:self.cfg();return True
+        except Exception as error:messagebox.showerror('Active settings',str(error),parent=self.root);return False
+
+    def clear_search_state(self):
+        self.result_versions={}
+        self.hits={};self.tree.delete(*self.tree.get_children());self.next_offset=None;self.open_doc=None;self.next_char=None;self.result_origin=None;self.manual_searcher=None
+        self.result_summary.set('Search or browse again to see current reports.');self.show('Search or browse the active library.');self.refresh_navigation()
+
+    def invalidate_library_ui(self):
+        self.clear_search_state();self.new_conversation(save_current=False)
+
+    @staticmethod
+    def capture_documents(library,ids):
+        ids=list({ident for ident in ids if ident is not None})
+        if not ids:return {}
+        return {row[0]:row[1] for row in library.db.execute('SELECT id,text_hash FROM documents WHERE id IN ('+','.join('?' for _ in ids)+')',ids)}
+
+    @staticmethod
+    def check_document(library,doc_id,versions):
+        if doc_id not in versions:return
+        row=library.db.execute('SELECT text_hash FROM documents WHERE id=?',(doc_id,)).fetchone()
+        if row is None or row[0]!=versions[doc_id]:raise ValueError('Source changed since these results were loaded. Search or browse again.')
+
+    def selected_doc(self):
+        selected=self.tree.selection()
+        if not selected or selected[0] not in self.hits:return None
+        hit=self.hits[selected[0]]
+        return hit.get('doc_id') or (hit['locations'][0].get('doc_id') if hit.get('locations') else None)
+
+    def refresh_navigation(self):
+        if hasattr(self,'next_page_button'):
+            ready=not self.busy and self.open_doc is not None and self.next_char is not None and self.selected_doc()==self.open_doc
+            self.next_page_button.configure(state='normal' if ready else 'disabled')
+
+    def result_is_current(self):
+        if self.result_origin is not None and self.result_origin!=self.library_origin():
+            self.invalidate_library_ui();return False
+        return True
 
     def cfg(self):
         from .__main__ import configuration
@@ -264,8 +326,11 @@ class App:
         from .gui_views import build_views
         build_views(self)
 
-    def new_conversation(self):
+    def new_conversation(self,save_current=True):
         if self.busy:return
+        if save_current:self.save_conversation()
+        self.transcript=[];self.session_id=None;self.last_attempt=None;self.conversation_library=None;self.conversation_omitted=0
+        if hasattr(self,'retry_button'):self.retry_button.configure(state='disabled')
         self.conversation=[];self.turns=[];self.conversation_turn=0;self.question_serial+=1;self.question.set('');self.stream_action='';self.stream_thinking=''
         self.conversation_evidence=None
         self.chat.configure(state='normal');self.chat.delete('1.0','end');self.chat.configure(state='disabled')
@@ -275,9 +340,14 @@ class App:
         self.chat_status.set('Ask a question, then follow up in the same conversation.');self.reading_status.set('');self.reading_titles=[]
         self.select_trace()
 
-    def append_chat(self,speaker,text,sources=()):
-        self.chat.configure(state='normal');self.chat.insert('end',speaker+'\n','speaker');self.chat.insert('end',text+'\n')
-        self.source_links(sources,self.chat,prefix='chat-'+str(self.question_serial)+'-source-')
+    def append_chat(self,speaker,text,sources=(),result=None,record=True):
+        self.chat.configure(state='normal');self.chat.insert('end',speaker+'\n','speaker');start=self.chat.index('end-1c');self.chat.insert('end',text+'\n')
+        prefix='chat-'+str(self.question_serial)+'-source-'
+        self.source_links(sources,self.chat,prefix=prefix,evidence_result=result)
+        available={source['id'] for source in sources}
+        for match in re.finditer(r'\[(\d+)\]',text):
+            if int(match[1]) in available:self.chat.tag_add(prefix+match[1],start+'+'+str(match.start())+'c',start+'+'+str(match.end())+'c')
+        if record:self.transcript.append({'speaker':speaker,'text':text,'sources':list(sources),'turn_id':self.conversation_turn})
         self.chat.insert('end','\n')
         if len(self.chat.get('1.0','end-1c'))>200000:self.chat.delete('1.0','end-200000c')
         for tag in self.chat.tag_names():
@@ -310,7 +380,7 @@ class App:
         self.replace_text(self.timing_details,format_timing(result['gui_timing']) if result.get('gui_timing') else json.dumps(result.get('timings',{}),indent=2))
 
     def launch_metadata_review(self):
-        if not self.save():return
+        if not self.ensure_active():return
         import subprocess,sys
         subprocess.Popen([sys.executable,'-m','local_search.metadata_gui','--config',str(self.path)],cwd=str(Path(__file__).resolve().parents[1]),creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
 
@@ -318,6 +388,9 @@ class App:
         if self.busy:return
         selected=self.tree.selection()
         if not selected or selected[0] not in self.hits:return
+        if not self.result_is_current():return
+        if self.selected_doc()!=self.open_doc:self.open_doc=None;self.next_char=None
+        self.refresh_navigation()
         hit=self.hits[selected[0]]
         if 'passage_id' in hit:
             self.show(hit['text'])
@@ -340,7 +413,7 @@ class App:
         self.tooltip.geometry(f'+{event.x_root+12}+{event.y_root+16}')
         ttk.Label(self.tooltip,text=text,padding=8,wraplength=850,relief='solid').pack()
 
-    def source_links(self,sources,widget=None,prefix='source-'):
+    def source_links(self,sources,widget=None,prefix='source-',evidence_result=None):
         if not sources:return
         widget=widget or self.output
         widget.insert('end','\n\nSources (hover for title, path and dates):\n')
@@ -353,7 +426,58 @@ class App:
             detail='\n'.join([source['title'],source['locator']]+[f'{k}: {source[k]}' for k in ('added_at','modified_at','published_at') if source.get(k)])
             widget.tag_bind(tag,'<Enter>',lambda e,t=detail,w=widget:(w.configure(cursor='hand2'),self.hint(e,t)))
             widget.tag_bind(tag,'<Leave>',lambda e,w=widget:(w.configure(cursor='xterm'),self.hide_hint()))
-            widget.tag_bind(tag,'<Button-1>',lambda e,s=dict(source):self.open_link(s))
+            widget.tag_bind(tag,'<Button-1>',lambda e,s=dict(source),r=evidence_result:self.inspect_citation(s,r) if r is not None else self.open_link(s))
+
+    def inspect_citation(self,source,result):
+        from .evidence_viewer import show
+        show(self,source,result)
+
+    def save_conversation(self):
+        if not self.transcript:return
+        try:
+            self.session_id=self.conversation_store.save({'title':next((item['text'][:90] for item in self.transcript if item['speaker']=='You'),'Conversation'),
+                'library':self.conversation_library,'library_binding':list(self.library_origin()),'conversation':self.conversation,'transcript':self.transcript,
+                'turns':self.turns,'evidence':self.conversation_evidence,'last_attempt':self.last_attempt,'conversation_omitted':self.conversation_omitted},self.session_id)
+        except OSError as error:self.status.set('Answer kept in this window; conversation save failed: '+str(error))
+
+    def open_conversations(self):
+        if self.busy:return
+        window=tk.Toplevel(self.root);window.title('Saved conversations');window.geometry('680x420')
+        items=self.conversation_store.listing();listing=tk.Listbox(window);listing.pack(fill='both',expand=True,padx=12,pady=12)
+        for item in items:listing.insert('end',time.strftime('%Y-%m-%d %H:%M',time.localtime(item['updated_at']))+' · '+str(item['title']))
+        def load():
+            selected=listing.curselection()
+            if not selected:return
+            try:
+                value=self.conversation_store.load(items[selected[0]]['id'])
+                if value.get('library_binding')!=list(self.library_origin()):raise ValueError('Choose this conversation’s library in Settings before resuming it.')
+                self.new_conversation();self.session_id=value['id'];self.conversation=value['conversation'];self.conversation_library=value['library'];self.turns=value['turns'];self.conversation_evidence=value.get('evidence');self.last_attempt=value.get('last_attempt');self.conversation_omitted=value.get('conversation_omitted',0)
+                self.conversation_turn=max([item.get('turn_id',0) for item in value['transcript']]+[0])
+                for item in value['transcript']:
+                    self.question_serial+=1;result=next((turn['result'] for turn in self.turns if turn.get('turn_id')==item.get('turn_id')),None) if item['speaker']=='Assistant' else None
+                    self.append_chat(item['speaker'],item['text'],item.get('sources',[]),result or {} if item['speaker']=='Assistant' else None,record=False)
+                self.transcript=value['transcript'];self.trace_selector.configure(values=['Current turn']+[turn['label'] for turn in self.turns]);self.retry_button.configure(state='normal' if self.last_attempt and self.last_attempt.get('failed') else 'disabled')
+                self.chat_status.set('Conversation restored. Previous excerpts will be checked again before reuse.');self.tabs.select(self.ask_tab);window.destroy()
+            except (OSError,ValueError,KeyError,TypeError) as error:messagebox.showerror('Saved conversation',str(error),parent=window)
+        ttk.Button(window,text='Open selected conversation',command=load).pack(pady=(0,12))
+
+    def copy_answer(self):
+        answer=next((item for item in reversed(self.transcript) if item['speaker']=='Assistant'),None)
+        if answer:
+            from .conversations import export_text
+            self.root.clipboard_clear();self.root.clipboard_append(export_text([answer]));self.status.set('Last answer and source links copied.')
+
+    def export_conversation(self):
+        if not self.transcript:return
+        path=filedialog.asksaveasfilename(parent=self.root,defaultextension='.md',filetypes=[('Markdown','*.md'),('Text','*.txt')])
+        if path:
+            from .conversations import export_text
+            try:Path(path).write_text(export_text(self.transcript),'utf-8');self.status.set('Conversation exported.')
+            except OSError as error:messagebox.showerror('Export conversation',str(error),parent=self.root)
+
+    def retry_question(self):
+        if self.busy or not self.last_attempt or not self.last_attempt.get('failed'):return
+        self.conversation=list(self.last_attempt['prior']);self.conversation_evidence=self.last_attempt.get('evidence');self.question.set(self.last_attempt['question']);self.question_model()
 
     def open_link(self,source):
         self.hide_hint()
@@ -381,7 +505,14 @@ class App:
             self.library=None;self.library_key=None
             self.library=Library(key[0],cache_mb=key[1]);self.library_key=key
             self.manual_searcher=None
+        state=self.manager.status() if self.manager else None
+        self.emit({'type':'library_state','state':state,'local_path':str(self.library.path)})
         return self.library
+
+    def show_library_state(self,state,local_path=None):
+        if not state:self.sync_summary.set('Local library · network sync off');return
+        label='Sync needs attention: '+state['error'] if state.get('error') else 'Changes waiting to sync' if state['pending'] else 'Published snapshot up to date'
+        self.sync_summary.set(label+' · Working locally: '+str(state.get('local_path',local_path)))
 
     def queue_steering(self):
         try:
@@ -392,7 +523,7 @@ class App:
         except ValueError as error:self.steering_status.set(str(error))
 
     def sync_status(self):
-        if self.busy or not self.save():return
+        if not self.ensure_active():return
         config=self.cfg()
         def work():
             self.get_library(config)
@@ -400,13 +531,13 @@ class App:
         self.submit(work,self.display_report)
 
     def sync_now(self):
-        if self.busy or not self.save():return
+        if not self.ensure_active():return
         config=self.cfg()
         def work():
             self.get_library(config)
             if not self.manager:raise ValueError('Enable AppData working copy or select a network library first')
             self.emit({'type':'phase','text':'Publishing consistent library snapshot…'})
-            return self.manager.sync(self.cancel)
+            result=self.manager.sync(self.cancel);self.emit({'type':'library_state','state':result,'local_path':str(self.manager.path)});return result
         self.submit(work,self.display_report,inference=True)
 
     def model_diagnostics(self):
@@ -418,7 +549,7 @@ class App:
         self.submit(work,self.display_report)
 
     def load_published(self):
-        if self.busy or not self.save():return
+        if not self.ensure_active():return
         if not messagebox.askyesno('Load published copy','Replace the local working copy with the published copy? Any pending local work will be saved in before-network-import.db in the AppData library folder. This chooses the published version; it does not merge changes.',parent=self.root):return
         config=self.cfg()
         def work():
@@ -490,6 +621,7 @@ class App:
                 from .display_stream import DisplayStream
                 self.display_stream=DisplayStream(event.get('thinking',False))
                 text.append(f"\n--- Model round {event['round']} ---\n");thought.append(f"\n--- Model round {event['round']} ---\n")
+            elif event['type']=='library_state':self.show_library_state(event.get('state'),event['local_path'])
             elif event['type']=='phase':
                 if self.ask_active:
                     label='Selecting reports…' if event['text'].startswith('Tool: search') or event['text'].startswith('Tool: catalog') else 'Reading selected reports…' if event['text'].startswith('Tool: context') or event['text'].startswith('Tool: document') else 'Writing answer…' if 'Finalising' in event['text'] else 'Thinking…' if 'prompt' in event['text'].lower() or event['text'].startswith('Tool:') else event['text']
@@ -530,10 +662,12 @@ class App:
                 self.ingesting=False;self.ingest_bar.stop()
             if self.closing:self.root.destroy();return
             for c in self.controls:c.configure(state='normal')
-            self.stop.configure(state='disabled')
+            self.stop.configure(state='disabled');self.refresh_navigation()
             if error:
                 if self.ask_active:
                     self.ask_active=False;self.chat_status.set('Could not complete this answer.');self.reading_titles=[];self.reading_status.set('');self.append_chat('Assistant','Could not complete this answer: '+error)
+                    if self.last_attempt:self.last_attempt['failed']=True;self.retry_button.configure(state='normal')
+                    self.save_conversation()
                 self.status.set(error);messagebox.showerror('Operation failed',error,parent=self.root)
             else:
                 self.status.set('Ready')
@@ -541,6 +675,8 @@ class App:
                 elapsed=time.perf_counter()-self.operation_started
                 if not isinstance(result,dict) or 'gui_timing' not in result:self.metrics.set(self.metrics.get()+f' | Displayed in {elapsed:.2f}s')
         except queue.Empty:pass
+        except Exception as error:
+            self.busy=False;self.status.set('Could not display result: '+str(error));messagebox.showerror('Display result',str(error),parent=self.root)
         if not self.busy and self.manager and self.raw.get('library_sync',{}).get('auto_sync',False) and time.monotonic()>=self.next_sync_check:
             self.next_sync_check=time.monotonic()+15
             def background_sync():
@@ -549,13 +685,14 @@ class App:
                     except Exception:return self.manager.status()
                 return None
             def sync_finished(result):
+                if result:self.show_library_state(result)
                 if result:self.status.set('Library sync pending: '+result['error'] if result.get('error') else 'Library snapshot synced to '+result['network_path'])
             self.submit(background_sync,sync_finished,inference=True)
         self.root.after(80,self.poll)
 
     def ingest(self,automatic=False):
         if self.busy:return
-        if not automatic and not self.save():return
+        if not automatic and not self.ensure_active():return
         if not automatic:self.tabs.select(self.search_tab)
         config=self.cfg()
         def work():
@@ -567,6 +704,7 @@ class App:
         with self.ingest_lock:self.ingest_latest=None
         self.ingest_bar.configure(mode='indeterminate');self.ingest_bar.start(80)
         def show(reports):
+            self.clear_search_state()
             count=sum(r.get('processed',r.get('indexed',0)+r.get('skipped',0)+r.get('errors',0)) for r in reports)
             errors=sum(r.get('errors',0)+len(r.get('scan_errors',[]))+('error' in r) for r in reports)
             skipped=sum(r.get('skipped',0) for r in reports);cached=sum(r.get('cached',0) for r in reports)
@@ -584,10 +722,12 @@ class App:
             self.ingest(automatic=True)
         self.root.after(1000,self.auto_refresh)
 
-    def display_report(self,result):self.tabs.select(self.search_tab);self.show(json.dumps(result,ensure_ascii=False,indent=2))
+    def display_report(self,result):
+        window=tk.Toplevel(self.root);window.title('Operation details');window.geometry('840x600')
+        text=ScrolledText(window,wrap='word',font=('Consolas',10));text.pack(fill='both',expand=True,padx=12,pady=12);text.insert('end',json.dumps(result,ensure_ascii=False,indent=2));text.configure(state='disabled')
 
     def index_status(self):
-        if not self.save():return
+        if not self.ensure_active():return
         config=self.cfg()
         def work():
             lib=self.get_library(config)
@@ -595,7 +735,7 @@ class App:
         self.submit(work,self.display_report)
 
     def search(self,offset=0):
-        if not self.save():return
+        if not self.ensure_active():return
         config=self.cfg();query=self.search_query.get();options=dict(after=self.after.get() or None,before=self.before.get() or None,date_field=self.date_field.get(),sort=self.sort.get(),limit=20,offset=offset,exact_count=self.exact_count.get(),input_mode=self.search_input_mode.get(),_relevance_question=self.relevance_question.get().strip())
         if offset and getattr(self,'search_request',None):
             query,options=self.search_request;options=dict(options,offset=offset)
@@ -616,12 +756,16 @@ class App:
                 result['reranking_trace']=self.manual_searcher.trace
             else:
                 self.manual_searcher=None;result=lib.search(query,**arguments)
+            result['document_versions']=self.capture_documents(lib,[loc.get('doc_id') for hit in result['results'] for loc in hit.get('locations',[])])
             result['timings'].update(queue_seconds=started-submitted,connection_seconds=opened-started)
             return result
         def show(result):
             render_started=time.perf_counter()
+            self.result_origin=self.library_origin(config);self.result_versions=result['document_versions'];self.open_doc=None;self.next_char=None
             self.next_offset=result['next_offset'];self.result_mode='search'
-            self.result_summary.set(str(len(result['results']))+' passages on this page'+(' · bounded reranked shortlist' if result.get('match_scope')=='candidate_pool' else '')+(' · more available' if self.next_offset is not None else ''))
+            rank=result.get('rerank',{});label='Question-ranked · bounded reranked shortlist' if rank.get('applied') else 'Newest first — reranker bypassed' if options['sort']=='newest' else 'Keyword order — reranker unavailable ('+str(rank.get('reason'))+')' if rank and rank.get('reason')!='no_candidates' else 'Keyword order'
+            pool=(' · '+str(result['candidate_count'])+' candidates'+(' · additional keyword matches outside this pool' if result.get('lexical_has_more') else '')) if result.get('match_scope')=='candidate_pool' else ''
+            self.result_summary.set(str(len(result['results']))+' passages on this page · '+label+pool+(' · more available' if self.next_offset is not None else ''))
             self.tree.delete(*self.tree.get_children());self.hits={}
             for i,hit in enumerate(result['results']):
                 self.hits[str(i)]=hit;loc=hit['locations'][0]
@@ -638,11 +782,14 @@ class App:
             else:self.browse(self.next_offset)
 
     def browse(self,offset=0):
-        if not self.save():return
+        if not self.ensure_active():return
         config=self.cfg()
         def work():
-            return self.get_library(config).catalog(offset=offset,limit=50)
-        def show(rows):
+            library=self.get_library(config);rows=library.catalog(offset=offset,limit=50)
+            return rows,self.capture_documents(library,[row.get('doc_id') for row in rows])
+        def show(bundle):
+            rows,self.result_versions=bundle
+            self.result_origin=self.library_origin(config);self.open_doc=None;self.next_char=None
             self.tree.delete(*self.tree.get_children());self.hits={};self.result_mode='catalog';self.next_offset=offset+len(rows) if len(rows)==50 else None
             self.result_summary.set(str(len(rows))+' sources on this page'+(' · more available' if self.next_offset is not None else ''))
             for i,row in enumerate(rows):
@@ -654,33 +801,39 @@ class App:
     def expand(self,event=None):
         selected=self.tree.selection()
         if not selected or self.busy:return
+        if not self.result_is_current():return
         hit=self.hits[selected[0]];config=self.cfg()
         if 'passage_id' not in hit:
             if hit.get('doc_id') is None:self.show(hit.get('detail','No indexed text'));return
             self.read_document();return
+        versions=dict(self.result_versions)
         def work():
-            return self.get_library(config).context(hit['passage_id'],doc_id=hit['locations'][0]['doc_id'],radius_chars=2000)
+            library=self.get_library(config);self.check_document(library,hit['locations'][0]['doc_id'],versions)
+            return library.context(hit['passage_id'],doc_id=hit['locations'][0]['doc_id'],radius_chars=2000)
         def show(result):self.show(result['text']);self.source_links(result['sources'])
         self.submit(work,show)
 
     def read_document(self,next_page=False):
         if self.busy:return
+        if not self.result_is_current():return
         if next_page:
-            if self.open_doc is None or self.next_char is None:return
+            if self.open_doc is None or self.next_char is None or self.selected_doc()!=self.open_doc:
+                self.open_doc=None;self.next_char=None;self.refresh_navigation();self.status.set('Open the selected source before continuing its pages.');return
             doc_id=self.open_doc;start=self.next_char
         else:
             selected=self.tree.selection()
             if not selected:return
-            hit=self.hits[selected[0]];doc_id=hit.get('doc_id') or (hit['locations'][0]['doc_id'] if hit.get('locations') else None)
+            hit=self.hits[selected[0]];doc_id=hit.get('doc_id') or (hit['locations'][0].get('doc_id') if hit.get('locations') else None)
             if doc_id is None:self.show(hit.get('detail','No indexed text'));return
             start=0
-        config=self.cfg()
+        config=self.cfg();versions=dict(self.result_versions)
         def work():
-            return self.get_library(config).read(doc_id,start,8000)
+            library=self.get_library(config);self.check_document(library,doc_id,versions)
+            return library.read(doc_id,start,8000)
         def show(result):
             self.open_doc=doc_id;self.next_char=result['next_start']
             self.show(result['text']+f"\n\nCharacters {result['start_char']}–{result['end_char']} of {result['total_chars']}."+(' End of indexed document.' if self.next_char is None else ' Use Next document page to continue.'))
-            self.source_links(result['sources'])
+            self.source_links(result['sources']);self.refresh_navigation()
         self.submit(work,show)
 
     def loaded_model(self,config):
@@ -718,7 +871,7 @@ class App:
         return self.reranker
 
     def model_check(self):
-        if not self.save():return
+        if not self.ensure_active():return
         config=self.cfg()
         def work():
             model=self.loaded_model(config)
@@ -730,11 +883,12 @@ class App:
     def question_model(self):
         if self.busy:return
         clicked=time.perf_counter()
-        if not self.save():return
-        config=self.cfg();question=self.question.get().strip()
+        if not self.ensure_active():return
+        config=self.cfg();config['agent_options']={**config.get('agent_options',{}),'effort':self.effort.get()};question=self.question_entry.get('1.0','end-1c').strip()
         if not question:return
         if self.conversation_library is not None and self.conversation_library!=config['database']:self.new_conversation()
         self.conversation_library=config['database'];prior=list(self.conversation[-40:]);prior_evidence=self.conversation_evidence;self.conversation_turn+=1;turn_number=self.conversation_turn
+        self.last_attempt={'question':question,'prior':prior,'evidence':prior_evidence,'failed':False};self.retry_button.configure(state='disabled')
         self.conversation.append({'role':'user','content':question});self.question.set('');self.append_chat('You',question);self.tabs.select(self.ask_tab)
         self.ask_active=True;self.reading_titles=[];self.reading_status.set('');self.chat_status.set('Thinking…');self.stream_action='';self.stream_thinking='';self.trace_choice.set('Current turn')
         self.question_serial+=1;question_serial=self.question_serial
@@ -764,14 +918,17 @@ class App:
             render_started=time.perf_counter()
             display=result.get('answer') or result['status']
             if result.get('gaps'):display+='\n\nUnresolved points:\n'+'\n'.join('• '+gap for gap in result['gaps'])
-            self.append_chat('Assistant',display,result.get('sources',[]));self.chat.update_idletasks()
+            self.last_attempt['failed']=not bool(result.get('answer'));self.retry_button.configure(state='normal' if self.last_attempt['failed'] else 'disabled')
+            omitted=result.get('conversation_messages_omitted',0)+self.conversation_omitted;dropped=result.get('previous_evidence',{}).get('dropped',0)
+            if omitted or dropped:display+='\n\nContext note: '+str(omitted)+' older messages omitted; '+str(dropped)+' previous excerpts dropped after source checks.'
+            self.append_chat('Assistant',display,result.get('sources',[]),result);self.chat.update_idletasks()
             refs=[{k:source.get(k) for k in ('id','title','doc_id')} for source in result.get('sources',[])]
-            self.conversation.append({'role':'assistant','content':'Previously cited reports (context only): '+json.dumps(refs,ensure_ascii=False)+'\nAnswer:\n'+display});self.conversation=self.conversation[-40:]
+            self.conversation.append({'role':'assistant','content':'Previously cited reports (context only): '+json.dumps(refs,ensure_ascii=False)+'\nAnswer:\n'+display});self.conversation_omitted+=max(0,len(self.conversation)-40);self.conversation=self.conversation[-40:]
             completed=time.perf_counter()
             timing=complete_timing(result,clicked,submitted,clock['worker_started'],clock['worker_finished'],render_started,completed,clock['load_seconds'],clock['library_seconds'])
             result['gui_timing']=timing
             if self.trace_choice.get()=='Current turn':self.replace_text(self.timing_details,format_timing(timing))
-            label='Turn '+str(turn_number)+': '+question[:60];self.turns.append({'label':label,'question':question,'result':result});self.turns=self.turns[-20:]
+            label='Turn '+str(turn_number)+': '+question[:60];self.turns.append({'label':label,'turn_id':turn_number,'question':question,'result':result});self.turns=self.turns[-20:]
             self.trace_selector.configure(values=['Current turn']+[turn['label'] for turn in self.turns])
             self.chat_status.set(('Ready' if result.get('answer') else 'Stopped: '+result['status'])+f" · {timing['click_to_complete_seconds']:.1f}s")
             checks=result.get('context_checks',[])
@@ -785,6 +942,7 @@ class App:
                 usage=result['notebook']
                 self.metrics.set(self.metrics.get()+f" | Notebook {usage['used_tokens']}/{usage['limit_tokens']} tokens ({usage['items']} items)")
             self.metrics.set(self.metrics.get()+' | '+result.get('effort','legacy')+' · '+result.get('stop_reason',result['status']))
+            self.save_conversation()
             # Save final GUI measurements after the answer is displayed. This background
             # persistence is deliberately outside click-to-answer completion time.
             trace=clock['trace']
@@ -802,6 +960,8 @@ class App:
         self.submit(work,show,inference=True)
 
     def close(self):
+        if self.ask_active and self.last_attempt:self.last_attempt['failed']=True
+        self.save_conversation()
         self.closing=True;self.cancel.set()
         if self.busy:self.status.set('Closing after the current native operation stops…')
         else:self.submit(self.unload)

@@ -128,7 +128,7 @@ The native runtime may need a compiler or an appropriate prebuilt wheel. Use the
 .\.venv\Scripts\python.exe -m local_search gui
 ```
 
-The interface uses standard-library Tkinter/ttk: no browser, web server or Electron. Under **Settings → Library & sources**, choose the index location and add PDF folders or clipper databases. Select the GGUF under **Local model**, then save. Click **Refresh index**, then use **Search** for keyword queries or **Ask local model** for questions. Double-click results for surrounding text; **Read source** and **Next page** provide full indexed-text access. **Browse sources** includes skipped files and their reasons; **More results** pages through matches or catalogue entries.
+The interface uses standard-library Tkinter/ttk: no browser, web server or Electron. Under **Settings → Library & sources**, choose the index location and add PDF folders or clipper databases. Select the GGUF under **Local model**, then save. Click **Refresh index**, then use the **Search** tab for keyword queries or **Ask** for conversational questions. Double-click results for surrounding text; **Read source** and **Next page** provide full indexed-text access. **Browse sources** includes skipped files and their reasons; **More results** pages through matches or catalogue entries.
 
 Indexing and inference run on a worker thread; GUI rendering stays lightweight. The model is cached until settings change or **Unload model** is pressed. **Stop operation** cancels at the next generation/agent boundary; native model loading and prompt evaluation may take time before they can stop. Set **Auto-refresh seconds** to 300 for five-minute refreshes while the GUI is open, or 0 for manual updates. Refresh and inference are serialized in the GUI. Each model question uses a consistent SQLite read snapshot; the WAL library permits an external updater to commit newer data for the next question.
 
@@ -267,7 +267,7 @@ For NVIDIA acceleration, install a compatible CUDA-enabled llama-cpp-python buil
 
 The GUI and config expose K and V precision independently: `f16`, `q8_0`, or `q4_0`. They map directly to llama.cpp's `type_k` and `type_v`. F16 is the conservative default; quantized caches reduce cache memory but can affect quality. No local 27B cache-quality comparison has been run here. Quantized V requires `flash_attention: true`; unsupported types or that incompatible combination are rejected before loading. Model/backend support still depends on the installed runtime. `kv_offload` maps to its `offload_kqv` option and can be disabled to keep those operations off the GPU.
 
-When one GPU drives both the desktop and inference, leave headroom by reducing GPU layers, context length and/or cache precision. These controls do not impose a hard VRAM reservation for Windows. The Tk GUI itself does not load a second model or use a GPU-rendered browser engine. Keep only one inference instance loaded; CLI model commands alongside the GUI can load another copy.
+When one GPU drives both the desktop and inference, leave headroom by reducing GPU layers, context length and/or cache precision. These controls do not impose a hard VRAM reservation for Windows. The Tk GUI itself does not load a second model or use a GPU-rendered browser engine. The desktop and metadata worker share a model-ownership lock to prevent a competing large model load.
 
 ## Troubleshooting and validation
 
@@ -285,7 +285,7 @@ MIT. See [LICENSE](LICENSE). Optional dependencies retain their respective licen
 
 ## Optional CPU or GPU reranking
 
-Reranking is **off by default** and applies only to **Ask local model** and CLI `ask`. Manual **Search FTS5**, catalogue browsing, document reading and ingestion retain their existing behaviour.
+Reranking is **off by default**. It applies to Ask and CLI `ask`, and optionally to manual Search when a separate relevance question is supplied. Catalogue browsing, document reading and ingestion do not rerank. The result view distinguishes question-ranked results from keyword fallback and newest-first bypass.
 
 FTS5 first retrieves a bounded pool of passages satisfying the original Boolean/proximity query and source/date filters. A separate CrossEncoder then scores each **(original natural-language question, passage text)** pair. The search model may provide `relevance_query` to focus that comparison. The scores estimate relevance; they are not confidence probabilities, factual verification or freshness scores. The reranker cannot discover documents outside the FTS candidate pool.
 
@@ -343,6 +343,12 @@ Model loading is local-files-only with remote code disabled. Missing models/depe
 For complete lexical enumeration, the model can set `search_scope:"exhaustive"`; `sort:"newest"` also bypasses reranking. Shortlist responses identify `match_scope:"candidate_pool"`, its size and whether more lexical results exist outside it. Paging is frozen within a question's database snapshot. Expired pools require restarting at offset zero; they are not silently rescored halfway through pagination.
 
 The timing breakdown separates **FTS searches** from **Reranking / shortlist work**. The local question trace records candidate IDs, ranked IDs, relevance question, device, scores, pair-token counts, fallback reasons and cold/warm load/scoring time. Compare identical questions and sources with the toggle off/on before treating it as an improvement. Neither an answered question nor a higher score proves better answer quality.
+
+## Metadata extraction and review
+
+The production [metadata workflow](METADATA_WORKFLOW.md) supports custom field profiles, seeded dry runs, durable jobs, reviewed acceptance and migration/backup tools. Open **Settings → Metadata review** for filtered review, editing and acceptance. Its **Extraction controls** panel manages profiles, random trials and bounded queued batches.
+
+Ask supports local saved conversations, multiline input, retry/copy/export and an in-app citation passage viewer. Settings are applied explicitly with **Save settings**. See [the controls guide](LOCAL_SEARCH_NEW_CONTROLS.md) for active-library/sync state, JSON options and evidence-retention details.
 
 ## Standalone metadata extraction demo
 

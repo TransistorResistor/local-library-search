@@ -16,7 +16,7 @@ def action_schema():
             'near':{'type':'object','properties':{'terms':strings,'distance':integer},'required':['terms'],'additionalProperties':False},
             'limit':integer,'offset':integer,'date_field':{'type':'string','enum':['added_at','modified_at','published_at']},
             'after':text,'before':text,'collection':text,'sort':{'type':'string','enum':['relevance','newest']},
-            'input_mode':{'type':'string','enum':['simple','advanced']},'exact_count':{'type':'boolean'}}),
+            'input_mode':{'type':'string','enum':['simple','advanced']},'exact_count':{'type':'boolean'},'search_scope':{'type':'string','enum':['shortlist','exhaustive']},'relevance_query':text}),
         action('catalog',{'offset':integer,'limit':integer,'status':text,'title_query':text,'input_mode':{'type':'string','enum':['simple','advanced']}}),
         action('context',{'passage_id':integer,'doc_id':integer,'radius_chars':integer},['passage_id']),
         action('document',{'doc_id':integer,'start_char':integer,'count_chars':integer},['doc_id']),

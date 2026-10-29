@@ -133,16 +133,21 @@ class GGUF:
 
 
 def parse_action(text):
-    # Strip a complete thinking block and extract exactly one JSON object. No eval/code execution.
-    if '</think>' in text:text=text.rsplit('</think>',1)[1]
-    decoder=json.JSONDecoder()
-    for start,char in enumerate(text):
-        if char=='{':
-            try:
-                value,_=decoder.raw_decode(text[start:])
-                if isinstance(value,dict) and 'action' in value:return value
-            except ValueError:pass
-    raise ValueError('Model did not return a JSON action')
+    # One top-level action only; do not accidentally execute a nested/second action.
+    text=text.strip()
+    if not text.startswith('{') and '</think>' in text:text=text.rsplit('</think>',1)[1].strip()
+    if text.startswith('```json') and text.endswith('```'):text=text[7:-3].strip()
+    elif text.startswith('```') and text.endswith('```'):text=text[3:-3].strip()
+    def unique(pairs):
+        value={}
+        for key,item in pairs:
+            if key in value:raise ValueError('Duplicate JSON key: '+key)
+            value[key]=item
+        return value
+    try:value=json.loads(text,object_pairs_hook=unique,parse_constant=lambda item:(_ for _ in ()).throw(ValueError('Non-finite JSON number')))
+    except (ValueError,TypeError) as error:raise ValueError('Model did not return exactly one JSON action: '+str(error)) from error
+    if not isinstance(value,dict) or 'action' not in value:raise ValueError('Model did not return a top-level JSON action')
+    return value
 
 
 def validate_cache(cache_k,cache_v,flash_attention):

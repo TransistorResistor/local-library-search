@@ -33,7 +33,8 @@ def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,pr
     searcher=None
     if reranker is not None and reranker.config.enabled:
         from .rerank import QuestionSearch,GUIDANCE
-        relevance=('\n'.join(item['content'] for item in history if item['role']=='user')+'\nCurrent question: '+question)[-8000:] if history else question
+        previous_question=next((item['content'] for item in reversed(history) if item['role']=='user'),'')
+        relevance=(previous_question+'\nCurrent question: '+question)[-8000:] if previous_question else question
         searcher=QuestionSearch(library,reranker,relevance,getattr(model,'cancel_event',None),on_event)
         system_prompt+='\n\n'+GUIDANCE
     owned=not library.db.in_transaction

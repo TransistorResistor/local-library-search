@@ -290,7 +290,7 @@ def main(argv=None):
     policy=sub.add_parser('policy');policy.add_argument('--collection',required=True);policy.add_argument('--profile');policy.add_argument('--mode',choices=('off','missing','changed'),required=True)
     jobs=sub.add_parser('jobs');jobs.add_argument('--status');jobs.add_argument('--limit',type=int,default=50)
     review=sub.add_parser('review');review.add_argument('--job',required=True);review.add_argument('--accept',action='store_true')
-    work=sub.add_parser('work');work.add_argument('--limit',type=int,default=20);work.add_argument('--retry-failed',action='store_true');work.add_argument('--output-dir',required=True)
+    work=sub.add_parser('work');work.add_argument('--collection',action='append',default=[]);work.add_argument('--limit',type=int,default=20);work.add_argument('--retry-failed',action='store_true');work.add_argument('--output-dir',required=True)
     values=sub.add_parser('values');values.add_argument('--source-id',type=int,required=True)
     override=sub.add_parser('set-field');override.add_argument('--source-id',type=int,required=True);override.add_argument('--profile');override.add_argument('--field',required=True);override.add_argument('--value-json',required=True)
     sub.add_parser('validate')
@@ -429,7 +429,11 @@ def run_queued(library,config,args):
     from .model import GGUF
     if not 1<=args.limit<=10000:raise ValueError('limit must be 1..10000')
     statuses=['pending','running']+(['failed'] if args.retry_failed else [])
-    jobs=[dict(r) for r in library.db.execute('SELECT * FROM metadata_jobs WHERE status IN ('+','.join('?' for _ in statuses)+') ORDER BY created_at LIMIT ?',statuses+[args.limit])]
+    where='status IN ('+','.join('?' for _ in statuses)+')';params=list(statuses)
+    collections=getattr(args,'collection',[])
+    if collections:
+        where+=' AND source_uuid IN (SELECT source_uuid FROM sources WHERE collection IN ('+','.join('?' for _ in collections)+'))';params.extend(collections)
+    jobs=[dict(r) for r in library.db.execute('SELECT * FROM metadata_jobs WHERE '+where+' ORDER BY created_at LIMIT ?',params+[args.limit])]
     if not jobs:return {'items':0}
     directory=Path(args.output_dir)
     if directory.exists() and any(directory.iterdir()):raise ValueError('Choose a new empty output directory to preserve prior reports')
@@ -450,6 +454,7 @@ def run_queued(library,config,args):
             with library.db:library.db.execute('UPDATE metadata_jobs SET model_hash=? WHERE id=?',(job['model_hash'],job['id']))
             source=read_source(library.path,job['source_id']);result=extract(source,model,profile)
             result['status']=commit_result(library,job,result,profile);summaries.append(write_item(directory,index,result,profile,False))
+            print('Source '+str(job['source_id'])+': '+result['status']+' ('+str(len(result['attempts']))+' attempts)',file=sys.stderr,flush=True)
     finally:close_model(model)
     write_summary(directory,{'dry_run':False,'selected':[{'source_id':job['source_id']} for job in jobs]},summaries)
     return {'items':len(summaries),'report':str(directory/'report.html'),'results':summaries}
