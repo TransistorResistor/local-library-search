@@ -24,7 +24,7 @@ class MetadataApp:
     def __init__(self,root,config_path):
         from .__main__ import configuration
         self.root=root;self.config_path=config_path;self.path=database_path(configuration(config_path))
-        self.record=None;self.values={};self.manual=set();self.field=None;self.busy=False;self.dirty=False;self.results=queue.Queue();self.list_items=[];self.offset=0;self.page_total=0;self.locked_widgets=[];self.raw_mode=tk.BooleanVar(value=False)
+        self.record=None;self.values={};self.manual=set();self.keep_quotes=set();self.field=None;self.busy=False;self.dirty=False;self.results=queue.Queue();self.list_items=[];self.offset=0;self.page_total=0;self.locked_widgets=[];self.raw_mode=tk.BooleanVar(value=False)
         root.title('Metadata review');root.geometry('1180x800');root.minsize(900,650)
         self.status=tk.StringVar(value='Loading findings…');self.filter=tk.StringVar(value='needs_review')
         bar=ttk.Frame(root,padding=12);bar.pack(fill='x')
@@ -45,6 +45,13 @@ class MetadataApp:
         ttk.Button(pagebar,text='Previous',command=lambda:self.refresh(max(0,self.offset-50))).pack(side='left')
         ttk.Button(pagebar,text='Next',command=lambda:self.refresh(self.offset+50) if self.offset+50<self.page_total else None).pack(side='left',padx=6)
         ttk.Button(pagebar,text='Extraction controls…',command=self.open_workflow).pack(side='right')
+        bulkbar=ttk.Frame(root,padding=(12,4));bulkbar.pack(fill='x')
+        self.bulk_scope=tk.StringVar(value='Selected findings')
+        ttk.Label(bulkbar,text='Bulk action scope').pack(side='left')
+        ttk.Combobox(bulkbar,textvariable=self.bulk_scope,values=('Selected findings','All matching filters'),state='readonly',width=22).pack(side='left',padx=6)
+        ttk.Button(bulkbar,text='Select page',command=lambda:self.jobs.selection_set(self.jobs.get_children())).pack(side='left',padx=4)
+        ttk.Button(bulkbar,text='Bulk approve…',command=lambda:self.open_bulk('approve')).pack(side='left',padx=4)
+        ttk.Button(bulkbar,text='Find and replace…',command=lambda:self.open_bulk('replace')).pack(side='left',padx=4)
         panes=ttk.Panedwindow(root,orient='horizontal');panes.pack(fill='both',expand=True,padx=12)
         left=ttk.Frame(panes);right_host=ttk.Frame(panes);panes.add(left,weight=1);panes.add(right_host,weight=3)
         self.right_canvas=tk.Canvas(right_host,highlightthickness=0);self.right_canvas.pack(side='left',fill='both',expand=True)
@@ -52,7 +59,7 @@ class MetadataApp:
         right=ttk.Frame(self.right_canvas,padding=(12,0));right_window=self.right_canvas.create_window((0,0),window=right,anchor='nw')
         right.bind('<Configure>',lambda event:self.right_canvas.configure(scrollregion=self.right_canvas.bbox('all')))
         self.right_canvas.bind('<Configure>',lambda event:self.right_canvas.itemconfigure(right_window,width=event.width))
-        self.jobs=ttk.Treeview(left,columns=('title','status'),show='headings',selectmode='browse')
+        self.jobs=ttk.Treeview(left,columns=('title','status'),show='headings',selectmode='extended')
         self.jobs.heading('title',text='Report');self.jobs.heading('status',text='Status');self.jobs.column('title',width=240);self.jobs.column('status',width=100)
         self.jobs.pack(side='left',fill='both',expand=True);scroll=ttk.Scrollbar(left,orient='vertical',command=self.jobs.yview);scroll.pack(side='right',fill='y');self.jobs.configure(yscrollcommand=scroll.set);self.jobs.bind('<<TreeviewSelect>>',self.select_job)
         self.title=tk.StringVar(value='Choose a finding');ttk.Label(right,textvariable=self.title,font=('Segoe UI',12,'bold'),wraplength=720).pack(anchor='w',pady=(0,8))
@@ -66,6 +73,7 @@ class MetadataApp:
         ttk.Checkbutton(self.editor,text='Edit raw field JSON',variable=self.raw_mode,command=self.reload_field).pack(anchor='w')
         self.value_text=ScrolledText(self.editor,height=3,wrap='word',font=('Segoe UI',10));self.value_text.pack(fill='x',pady=4)
         self.value_text.bind('<KeyRelease>',lambda event:self.unknown.set(False) if self.value_text.get('1.0','end-1c').strip() else None)
+        self.value_text.bind('<<Modified>>',self.value_changed)
         self.precision=tk.StringVar(value='day');self.scope=tk.StringVar()
         detail=ttk.Frame(self.editor);detail.pack(fill='x');self.scalar_detail=detail
         ttk.Label(detail,text='Date precision').pack(side='left');self.precision_box=ttk.Combobox(detail,textvariable=self.precision,values=('year','month','day'),state='readonly',width=8);self.precision_box.pack(side='left',padx=6)
@@ -98,7 +106,7 @@ class MetadataApp:
         self.accept_button=ttk.Button(actions,text='Accept finding',command=lambda:self.save(True));self.accept_button.pack(side='left',padx=8)
         ttk.Button(actions,text='Accept and next',command=lambda:self.save(True,advance=True)).pack(side='left',padx=8)
         ttk.Button(actions,text='Open original',command=self.open_original).pack(side='left',padx=8)
-        ttk.Label(actions,text='Edited fields become protected manual corrections when accepted.',wraplength=600).pack(side='left',padx=12)
+        ttk.Label(actions,text='Manual edits replace inherited quotes and become protected corrections when accepted.',wraplength=600).pack(side='left',padx=12)
         status_label=ttk.Label(root,textvariable=self.status,padding=(12,4),wraplength=1100);status_label.pack(side='bottom',fill='x',before=panes)
         root.bind('<Control-s>',lambda e:self.save(False));root.bind('<Control-Return>',lambda e:self.save(True,advance=True))
         for tree in (self.jobs,self.fields,self.list_tree):
@@ -166,6 +174,7 @@ class MetadataApp:
     def select_job(self,event=None):
         selection=self.jobs.selection()
         if self.busy or not selection:return
+        if len(selection)>1:self.status.set(str(len(selection))+' findings selected. Use Bulk approve or Find and replace.');return
         if self.record and selection[0]==self.record['job']['id']:return
         if self.record and not self.apply_field():return
         if self.dirty and not messagebox.askyesno('Unsaved edits','Discard unsaved edits and open another finding?',parent=self.root):
@@ -174,7 +183,9 @@ class MetadataApp:
         self.submit(lambda:review.fetch(self.path,selection[0]),self.load_record)
 
     def load_record(self,record):
-        self.record=record;self.values=copy.deepcopy(record['metadata'] or {f['name']:None for f in record['profile']['fields']});self.manual=set(record['manual_fields']);self.dirty=False;self.field=None
+        self.record=record;self.values=copy.deepcopy(record['metadata'] or {f['name']:None for f in record['profile']['fields']});self.manual=set(record['manual_fields']);self.keep_quotes=set(record.get('preserve_evidence_fields',[]));self.dirty=False;self.field=None
+        for name in self.manual-self.keep_quotes:
+            if isinstance(self.values.get(name),dict):self.values[name]['evidence']=[]
         self.jobs.selection_set(record['job']['id']) if self.jobs.exists(record['job']['id']) else None
         self.title.set(record['title']+(' · Source changed: acceptance blocked' if record['stale'] else ''))
         self.fields.delete(*self.fields.get_children())
@@ -213,10 +224,14 @@ class MetadataApp:
     def reload_field(self):
         if self.field:self.render_field(self.values.get(self.field['name']))
 
+    def field_errors(self):
+        name=self.field['name'];overridden=name in self.manual and name not in self.keep_quotes
+        return '; '.join(issue for issue in self.record['issues'] if issue.startswith(name+':') and not (overridden and ('Evidence quote' in issue or 'Missing evidence' in issue)))
+
     def render_field(self,item):
         kind=self.field['type'];value=item.get('value') if isinstance(item,dict) else '';self.unknown.set(item is None);self.value_text.delete('1.0','end')
         self.comparison.set('Current: '+summary(self.record.get('current_values',{}).get(self.field['name'],{}).get('value'))+' · Manual override: '+summary(self.record['overrides'].get(self.field['name'])))
-        self.field_issue.set('; '.join(issue for issue in self.record['issues'] if issue.startswith(self.field['name']+':')))
+        self.field_issue.set(self.field_errors())
         if self.raw_mode.get():
             self.value_text.insert('end',json.dumps(item,ensure_ascii=False,indent=2));self.list_frame.pack_forget();self.value_text.pack(fill='x',pady=4,before=self.help_label);self.scalar_detail.pack_forget()
             self.help.set('Invalid structure: correct the field JSON, or reset to unknown and enter a fresh value. The original extraction remains in the audit history.');self.show_evidence();return
@@ -225,8 +240,6 @@ class MetadataApp:
         self.list_values=copy.deepcopy(value) if kind in ('date_list','interval_list') and isinstance(value,list) else [];self.draw_list()
         if kind=='date' or self.field.get('scoped'):self.scalar_detail.pack(fill='x',before=self.help_label)
         else:self.scalar_detail.pack_forget()
-        self.comparison.set('Current: '+summary(self.record.get('current_values',{}).get(self.field['name'],{}).get('value'))+' · Manual override: '+summary(self.record['overrides'].get(self.field['name'])))
-        self.field_issue.set('; '.join(issue for issue in self.record['issues'] if issue.startswith(self.field['name']+':')))
         if kind in ('date_list','interval_list'):self.list_frame.pack(fill='x',pady=4);self.value_text.pack_forget()
         else:self.list_frame.pack_forget();self.value_text.pack(fill='x',pady=4,before=self.help_label)
         self.help.set(self.field.get('prompt','')+(' Use one item per line.' if kind=='string_list' else '')+(' A saved manual override already exists for this field.' if self.field['name'] in self.record['overrides'] else ''))
@@ -257,6 +270,11 @@ class MetadataApp:
         selected=self.list_tree.selection()
         if selected:self.list_values.pop(int(selected[0]));self.draw_list();self.apply_field()
 
+    def value_changed(self,event=None):
+        if not self.value_text.edit_modified():return
+        if self.value_text.get('1.0','end-1c').strip():self.unknown.set(False)
+        self.value_text.edit_modified(False)
+
     def apply_field(self):
         if self.busy:return False
         if not self.field or not self.record:return True
@@ -270,16 +288,24 @@ class MetadataApp:
                 item={'value':value,'evidence':copy.deepcopy(old.get('evidence',[])) if isinstance(old,dict) else []}
                 if kind=='date':item['precision']=self.precision.get()
                 if self.field.get('scoped'):item['scope']=self.scope.get().strip()
+            payload=lambda value:{key:member for key,member in value.items() if key!='evidence'} if isinstance(value,dict) else value
+            if canonical(payload(item))!=canonical(payload(old)):
+                if isinstance(item,dict):item['evidence']=[]
+                self.keep_quotes.discard(name)
+            elif self.raw_mode.get() and isinstance(item,dict) and isinstance(old,dict) and item.get('evidence')!=old.get('evidence'):self.keep_quotes.add(name)
             if canonical(item)!=canonical(old):
                 self.values[name]=item;self.manual.add(name);self.dirty=True
                 self.fields.item(name,values=(name,summary(item),'Manual edit'))
+                self.field_issue.set(self.field_errors())
+                self.show_evidence()
             return True
         except (ValueError,KeyError) as error:self.status.set('Check the value for '+name+': '+str(error));return False
 
     def show_evidence(self):
         if not self.field:return
         item=self.values.get(self.field['name']);quotes=item.get('evidence',[]) if isinstance(item,dict) else []
-        text='Supporting quotes for this field:\n'+json.dumps(quotes,ensure_ascii=False,indent=2)+'\n\nOriginal excerpts:\n'
+        manual=self.field['name'] in self.manual and self.field['name'] not in self.keep_quotes
+        text=('Manual correction: inherited evidence is replaced. The value does not need to occur in the text.\n\n' if manual else '')+'Supporting quotes for this field:\n'+json.dumps(quotes,ensure_ascii=False,indent=2)+'\n\nOriginal excerpts (retained for history):\n'
         for excerpt in self.record['excerpts']:text+='\n'+excerpt['excerpt_id']+' · pages '+str(excerpt.get('pages',[]))+'\n'+excerpt['text']+'\n'
         self._text(self.evidence,text);ids=[e['excerpt_id'] for e in self.record['excerpts']];self.excerpt_box.configure(values=ids)
         if ids:self.excerpt.set(ids[0])
@@ -291,29 +317,46 @@ class MetadataApp:
         if not isinstance(item,dict):self.status.set('Correct the field structure or reset it before adding quotes.');return
         text=next((e['text'] for e in self.record['excerpts'] if e['excerpt_id']==self.excerpt.get()),'')
         if not self.quote.get().strip() or self.quote.get() not in text:self.status.set('The quote must exactly match the selected excerpt.');return
-        item['evidence']=[{'excerpt_id':self.excerpt.get(),'quote':self.quote.get()}];self.manual.add(self.field['name']);self.dirty=True;self.show_evidence()
+        item['evidence']=[{'excerpt_id':self.excerpt.get(),'quote':self.quote.get()}];self.manual.add(self.field['name']);self.keep_quotes.add(self.field['name']);self.dirty=True;self.show_evidence()
 
     def clear_quotes(self):
         if not self.apply_field() or not self.field:return
         item=self.values.get(self.field['name'])
         if item is not None and not isinstance(item,dict):self.status.set('Correct the field structure or reset it before editing quotes.');return
-        if item is not None:item['evidence']=[];self.manual.add(self.field['name']);self.dirty=True;self.show_evidence()
+        if item is not None:item['evidence']=[];self.manual.add(self.field['name']);self.keep_quotes.discard(self.field['name']);self.dirty=True;self.show_evidence()
 
     def save(self,accept=False,advance=False):
         if self.busy or not self.record or not self.apply_field():return
+        if len(self.jobs.selection())>1:self.status.set('Use Bulk approve for multiple selected findings.');return
         if accept and not messagebox.askyesno('Accept finding','Accept these values? Edited fields will be stored as protected manual corrections.',parent=self.root):return
         rows=list(self.jobs.get_children());position=rows.index(self.record['job']['id']) if self.record['job']['id'] in rows else 0
         next_position=position+1 if self.filter.get() in ('all','accepted') else position
-        ident=self.record['job']['id'];token=self.record['review_token'];values=copy.deepcopy(self.values);manual=set(self.manual)
+        ident=self.record['job']['id'];token=self.record['review_token'];values=copy.deepcopy(self.values);manual=set(self.manual);keep=set(self.keep_quotes)
         def done(record):
             self.load_record(record);self.status.set('Finding accepted.' if accept else 'Draft saved. '+('; '.join(record['issues']) if record['issues'] else 'Ready for review.'))
             if advance:self.refresh(self.offset,select_index=next_position);return
             if self.jobs.exists(ident):self.jobs.item(ident,values=(record['title'],record['job']['status']))
-        self.submit(lambda:review.save(self.path,ident,values,token,manual,accept),done)
+        self.submit(lambda:review.save(self.path,ident,values,token,manual,accept,keep),done)
 
     def reset_field(self):
         if self.busy or not self.field:return
-        name=self.field['name'];self.values[name]=None;self.manual.add(name);self.dirty=True;self.raw_mode.set(False);self.render_field(None);self.fields.item(name,values=(name,'Unknown','Manual edit'))
+        name=self.field['name'];self.values[name]=None;self.manual.add(name);self.keep_quotes.discard(name);self.dirty=True;self.raw_mode.set(False);self.render_field(None);self.fields.item(name,values=(name,'Unknown','Manual edit'))
+
+    def open_bulk(self,operation):
+        if self.busy:return
+        selected=list(self.jobs.selection());scope=self.bulk_scope.get()
+        if scope=='Selected findings' and not selected:self.status.set('Select findings, or choose All matching filters.');return
+        if self.record and not self.apply_field():return
+        filters={'status':self.filter.get(),'query':self.query.get().strip(),'collection':self.collection.get().strip(),'profile':self.profile_filter.get().strip()}
+        def launch():
+            from .metadata_bulk_gui import BulkDialog
+            BulkDialog(self,operation,selected if scope=='Selected findings' else None,filters)
+        if self.dirty:
+            if not messagebox.askyesno('Save current draft','Save the current draft before preparing the bulk preview?',parent=self.root):return
+            ident=self.record['job']['id'];values=copy.deepcopy(self.values);token=self.record['review_token'];manual=set(self.manual);keep=set(self.keep_quotes)
+            def done(record):self.load_record(record);launch()
+            self.submit(lambda:review.save(self.path,ident,values,token,manual,False,keep),done)
+        else:launch()
 
     def open_original(self):
         if not self.record or not self.record['locator']:return
@@ -327,7 +370,7 @@ class MetadataApp:
         self.workflow=WorkflowPanel(self.root,self.config_path)
 
     def close(self):
-        if self.busy:self.status.set('Finish the current save before closing.');return
+        if self.busy:self.status.set('Stop or finish the current operation before closing.');return
         if self.record and not self.apply_field():self.dirty=True
         if self.dirty and not messagebox.askyesno('Unsaved edits','Discard unsaved edits and close?',parent=self.root):return
         if hasattr(self,'workflow') and self.workflow.window.winfo_exists() and not self.workflow.close():return

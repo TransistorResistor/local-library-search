@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 import uuid
+import copy
 from contextlib import contextmanager
 from types import SimpleNamespace
 from .library_guard import LibraryGuard
@@ -58,7 +59,8 @@ def _fetch(db,ident):
     manual_fields=json.loads(latest[0]).get('review_manual_fields',[]) if latest else []
     return {'job':job,'profile':validate_profile(json.loads(profile[0])),'prompt':profile[1],'metadata':json.loads(job['result']) if job['result'] else None,
             'excerpts':json.loads(job['evidence'] or '[]'),'issues':json.loads(job['issues']),'overrides':overrides,'review_token':token,
-            'manual_fields':manual_fields,'current_values':values,'title':source[0] if source else 'Removed source','locator':source[1] if source else None,
+            'manual_fields':manual_fields,'preserve_evidence_fields':json.loads(latest[0]).get('review_preserve_evidence_fields',[]) if latest else [],
+            'current_values':values,'title':source[0] if source else 'Removed source','locator':source[1] if source else None,
             'stale':not current or current['source_uuid']!=job['source_uuid'] or current['text_hash']!=job['content_hash']}
 
 
@@ -67,23 +69,42 @@ def fetch(path,ident):
         db.execute('BEGIN');return _fetch(db,ident)
 
 
-def save(path,ident,metadata,token,manual_fields=(),accept=False):
+def prepare(record,metadata,manual_fields=(),preserve_evidence_fields=None):
+    """Human corrections replace inherited quotes unless the user explicitly keeps them."""
+    profile=record['profile'];names={field['name'] for field in profile['fields']}
+    manual=set(manual_fields)|set(record['manual_fields']);preserve=set(record.get('preserve_evidence_fields',[]) if preserve_evidence_fields is None else preserve_evidence_fields)
+    if manual-names or preserve-names:raise ValueError('Unknown edited fields')
+    metadata=copy.deepcopy(metadata)
+    for name in manual:
+        item=metadata.get(name) if isinstance(metadata,dict) else None
+        old=record['metadata'].get(name) if isinstance(record['metadata'],dict) else None
+        if preserve_evidence_fields is None and isinstance(item,dict) and isinstance(old,dict) and {k:v for k,v in item.items() if k!='evidence'}!={k:v for k,v in old.items() if k!='evidence'}:preserve.discard(name)
+        if isinstance(item,dict) and name not in preserve:item['evidence']=[]
+    checked={**profile,'fields':[dict(field,evidence=False) if field['name'] in manual else field for field in profile['fields']]}
+    parsed,issues=parse_and_validate(canonical(metadata),checked,record['excerpts'])
+    return parsed,issues,manual,preserve&manual
+
+
+def check_source(db,record):
+    if record['stale'] or record['job']['status']=='stale':raise ValueError('The source changed or was removed; extract a fresh finding before accepting it.')
+    source=db.execute('SELECT doc_id FROM sources WHERE source_uuid=?',(record['job']['source_uuid'],)).fetchone()
+    for excerpt in record['excerpts']:
+        actual=db.execute('SELECT substr(text,?,?) FROM documents WHERE id=?',(excerpt['start_char']+1,len(excerpt['text']),source[0])).fetchone()[0]
+        if actual!=excerpt['text']:raise ValueError('Stored evidence no longer matches the indexed document')
+
+
+def save(path,ident,metadata,token,manual_fields=(),accept=False,preserve_evidence_fields=None):
     with connection(path,True) as db:
         try:
             db.execute('BEGIN IMMEDIATE');record=_fetch(db,ident);job=record['job']
             if record['review_token']!=token:raise ValueError('This finding was changed elsewhere. Reload it before saving.')
-            if record['stale'] or job['status']=='stale':raise ValueError('The source changed or was removed; extract a fresh finding before accepting it.')
-            profile=record['profile'];names={f['name'] for f in profile['fields']};manual_fields=set(manual_fields)|set(record['manual_fields'])
-            if manual_fields-names:raise ValueError('Unknown edited fields')
-            source=db.execute('SELECT doc_id FROM sources WHERE source_uuid=?',(job['source_uuid'],)).fetchone()
-            for excerpt in record['excerpts']:
-                actual=db.execute('SELECT substr(text,?,?) FROM documents WHERE id=?',(excerpt['start_char']+1,len(excerpt['text']),source[0])).fetchone()[0]
-                if actual!=excerpt['text']:raise ValueError('Stored evidence no longer matches the indexed document')
-            checked={**profile,'fields':[dict(f,evidence=False) if f['name'] in manual_fields else f for f in profile['fields']]}
-            parsed,issues=parse_and_validate(canonical(metadata),checked,record['excerpts'])
+            check_source(db,record)
+            profile=record['profile'];names={field['name'] for field in profile['fields']}
+            parsed,issues,manual_fields,preserve=prepare(record,metadata,manual_fields,preserve_evidence_fields)
             if accept and issues:raise ValueError('Fix the following before accepting: '+'; '.join(issues))
             result={'status':'accepted' if accept else 'needs_review','metadata':parsed,'issues':issues,'excerpts':record['excerpts'],
-                    'attempts':json.loads(job['attempts']),'review_manual_fields':sorted(manual_fields),'review_action':'accept' if accept else 'save_draft'}
+                    'attempts':json.loads(job['attempts']),'review_manual_fields':sorted(manual_fields),'review_preserve_evidence_fields':sorted(preserve),
+                    'review_evidence_overridden':sorted(manual_fields-preserve),'review_action':'accept' if accept else 'save_draft'}
             if accept:
                 commit_result(SimpleNamespace(db=db),job,result,profile)
                 for name in names:
