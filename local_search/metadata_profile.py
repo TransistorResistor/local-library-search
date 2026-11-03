@@ -34,7 +34,7 @@ def validate_profile(profile):
     fields=profile.get('fields');names=[]
     if not isinstance(fields,list) or not 1<=len(fields)<=32:raise ValueError('Define 1..32 metadata fields')
     for field in fields:
-        if not isinstance(field,dict) or set(field)-{'name','type','prompt','evidence','generated','auto_accept','enum','max_items','scoped'}:raise ValueError('Unsupported field definition')
+        if not isinstance(field,dict) or set(field)-{'name','type','prompt','evidence','generated','auto_accept','enum','max_items','scoped','aliases'}:raise ValueError('Unsupported field definition')
         name=field.get('name');names.append(name)
         if not isinstance(name,str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,63}',name):raise ValueError('Field names must be stable lowercase identifiers')
         if field.get('type') not in TYPES:raise ValueError('Unsupported type for '+name)
@@ -44,6 +44,11 @@ def validate_profile(profile):
         if field.get('generated') and field.get('evidence',False):raise ValueError(name+': generated suggestions cannot require factual evidence')
         if 'enum' in field and (not isinstance(field['enum'],list) or not field['enum'] or any(not isinstance(v,str) for v in field['enum'])):raise ValueError(name+': enum must contain strings')
         if 'enum' in field and field['type'] not in ('string','string_list'):raise ValueError(name+': enum is supported for string fields/lists')
+        if 'aliases' in field:
+            from .metadata_aliases import compile_aliases
+            if field['type'] not in ('string','string_list'):raise ValueError(name+': aliases require a text or text-list field')
+            mapping=compile_aliases(field['aliases'])
+            if field.get('enum') and any(target not in field['enum'] for target in mapping.values()):raise ValueError(name+': canonical alias names must be in the allowed values')
         if type(field.get('max_items',12)) is not int or not 1<=field.get('max_items',12)<=100:raise ValueError(name+': max_items must be 1..100')
     if len(set(names))!=len(names):raise ValueError('Duplicate field names')
     for key,default,low,high in [('max_attempts',3,1,3),('max_chars',24000,100,200000),('max_input_tokens',8000,128,200000),('time_limit_seconds',180,1,3600)]:
@@ -64,7 +69,7 @@ def schema_for(profile):
     for field in profile['fields']:
         kind=field['type']
         value={'type':kind} if kind in ('string','number','integer','boolean') else {'type':'string'} if kind=='date' else {'type':'array','maxItems':field.get('max_items',12),'items':{'type':'string'} if kind=='string_list' else dict(date_item,required=['value','precision','scope']) if kind=='date_list' else interval}
-        if field.get('enum'):
+        if field.get('enum') and not field.get('aliases'):
             if kind=='string_list':value['items']['enum']=field['enum']
             elif kind=='string':value['enum']=field['enum']
         props={'value':value,'evidence':dict(evidence,minItems=1 if field.get('evidence',not field.get('generated',False)) else 0)};required=['value','evidence']
@@ -75,7 +80,10 @@ def schema_for(profile):
 
 
 def instructions(profile):
-    return SYSTEM+'\nUser extraction instructions:\n'+profile['instructions']+'\nFields:\n'+canonical(profile['fields'])+'\nOutput JSON schema:\n'+canonical(schema_for(profile))
+    fields=[{key:value for key,value in field.items() if key!='aliases' and not (key=='enum' and field.get('aliases'))} for field in profile['fields']]
+    aliases=[field['name'] for field in profile['fields'] if field.get('aliases')]
+    guidance='\nReturn original source wording for '+', '.join(aliases)+'. Approved alias maps are applied by the application after extraction; do not expand or normalise these names yourself.' if aliases else ''
+    return SYSTEM+'\nUser extraction instructions:\n'+profile['instructions']+'\nFields:\n'+canonical(fields)+'\nOutput JSON schema:\n'+canonical(schema_for(profile))+guidance
 
 
 def date_interval(item):
@@ -128,6 +136,8 @@ def parse_and_validate(raw,profile,excerpts):
                         a=date_interval(member['start']) if member['start'] is not None else None;b=date_interval(member['end']) if member['end'] is not None else None
                         if a is None and b is None or a and b and a[0]>b[1]:raise ValueError('Invalid interval endpoints')
             if field.get('enum'):
-                if any(v not in field['enum'] for v in (content if kind=='string_list' else [content])):raise ValueError('Value outside allowed enum')
+                from .metadata_aliases import normalise_item
+                checked_content=normalise_item(item,field)['value']
+                if any(v not in field['enum'] for v in (checked_content if kind=='string_list' else [checked_content])):raise ValueError('Value outside allowed enum')
         except (ValueError,TypeError,KeyError) as error:issues.append(name+': '+str(error))
     return value,issues

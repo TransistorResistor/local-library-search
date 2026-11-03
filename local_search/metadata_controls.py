@@ -129,7 +129,7 @@ class WorkflowPanel:
 
 class ProfileEditor:
     def __init__(self,parent,path,on_save):
-        self.path=Path(path);self.profile=copy.deepcopy(load_profile(self.path if self.path.is_file() else None));self.on_save=on_save;self.dirty=False;self.loading=False
+        self.path=Path(path);self.profile=copy.deepcopy(load_profile(self.path if self.path.is_file() else None));self.on_save=on_save;self.dirty=False;self.loading=False;self.active_aliases={}
         self.window=tk.Toplevel(parent);self.window.title('Metadata fields and prompts');self.window.geometry('820x740')
         self.name=tk.StringVar(value=self.profile['name']);ttk.Label(self.window,text='Profile name').pack(anchor='w',padx=12);ttk.Entry(self.window,textvariable=self.name).pack(fill='x',padx=12)
         ttk.Label(self.window,text='Instructions for all fields').pack(anchor='w',padx=12,pady=(8,0));self.instructions=ScrolledText(self.window,height=4,wrap='word');self.instructions.pack(fill='x',padx=12);self.instructions.insert('end',self.profile['instructions'])
@@ -139,8 +139,10 @@ class ProfileEditor:
         for row,(label,var) in enumerate([('Field name (lowercase_with_underscores)',self.field_name),('Type',self.kind),('Allowed values (comma-separated, optional)',self.enum),('Maximum list items',self.maximum)]):
             ttk.Label(frame,text=label).grid(row=row,column=0,sticky='w');widget=ttk.Combobox(frame,textvariable=var,values=TYPES,state='readonly') if var is self.kind else ttk.Entry(frame,textvariable=var);widget.grid(row=row,column=1,sticky='ew',pady=3)
         for col,(label,var) in enumerate([('Require quotes',self.evidence),('Generated suggestion',self.generated),('Auto accept',self.accept),('Needs scope',self.scoped)]):ttk.Checkbutton(frame,text=label,variable=var).grid(row=4,column=col,sticky='w')
+        ttk.Button(frame,text='Edit alias map…',command=self.edit_aliases).grid(row=5,column=0,sticky='w',pady=6)
+        self.alias_count=tk.StringVar(value='0 alias rules');ttk.Label(frame,textvariable=self.alias_count).grid(row=5,column=1,sticky='w')
         ttk.Label(self.window,text='Instructions for this field').pack(anchor='w',padx=12);self.prompt=ScrolledText(self.window,height=5,wrap='word');self.prompt.pack(fill='both',expand=True,padx=12)
-        bar=ttk.Frame(self.window,padding=12);bar.pack(fill='x')
+        bar=ttk.Frame(self.window,padding=12);bar.pack(side='bottom',fill='x',before=self.prompt.frame)
         for label,command in [('Add / update field',self.update),('Remove selected',self.remove),('Save profile as…',self.save)]:ttk.Button(bar,text=label,command=command).pack(side='left',padx=4)
         self.draw();self.window.protocol('WM_DELETE_WINDOW',self.close)
         for var in (self.name,self.field_name,self.kind,self.enum,self.maximum,self.evidence,self.generated,self.accept,self.scoped):var.trace_add('write',self.changed)
@@ -155,6 +157,7 @@ class ProfileEditor:
         self.dirty=True
 
     def close(self):
+        if hasattr(self,'alias_editor') and self.alias_editor.window.winfo_exists() and not self.alias_editor.close():return False
         if self.dirty and not messagebox.askyesno('Unsaved profile','Discard unsaved field/profile changes?',parent=self.window):return False
         self.window.destroy();return True
 
@@ -167,6 +170,7 @@ class ProfileEditor:
         if not selected:return
         self.loading=True
         field=self.profile['fields'][selected[0]];self.field_name.set(field['name']);self.kind.set(field['type']);self.enum.set(', '.join(field.get('enum',[])));self.maximum.set(str(field.get('max_items',12)))
+        self.active_aliases=copy.deepcopy(field.get('aliases',{}));self.alias_count.set(str(len(self.active_aliases))+' alias rules')
         for key,var in [('evidence',self.evidence),('generated',self.generated),('auto_accept',self.accept),('scoped',self.scoped)]:var.set(field.get(key,False))
         self.prompt.delete('1.0','end');self.prompt.insert('end',field.get('prompt',''));self.prompt.edit_modified(False);self.loading=False
 
@@ -174,6 +178,7 @@ class ProfileEditor:
         try:
             field={'name':self.field_name.get().strip(),'type':self.kind.get(),'prompt':self.prompt.get('1.0','end-1c'),'evidence':self.evidence.get(),'generated':self.generated.get(),'auto_accept':self.accept.get(),'scoped':self.scoped.get(),'max_items':int(self.maximum.get())}
             if self.enum.get().strip():field['enum']=[v.strip() for v in self.enum.get().split(',') if v.strip()]
+            if self.active_aliases:field['aliases']=dict(self.active_aliases)
             validate_profile({'name':'field-check','fields':[field]})
             index=next((i for i,f in enumerate(self.profile['fields']) if f['name']==field['name']),None)
             if index is None:self.profile['fields'].append(field)
@@ -181,12 +186,22 @@ class ProfileEditor:
             self.dirty=True;self.draw();return True
         except ValueError as error:messagebox.showerror('Field definition',str(error),parent=self.window);return False
 
+    def edit_aliases(self):
+        if hasattr(self,'alias_editor') and self.alias_editor.window.winfo_exists():self.alias_editor.window.lift();return
+        if not self.field_name.get().strip() or self.kind.get() not in ('string','string_list'):
+            messagebox.showinfo('Alias map','Choose or name a text or text-list field first.',parent=self.window);return
+        from .metadata_alias_gui import AliasEditor
+        def saved(aliases):
+            self.active_aliases=aliases;self.alias_count.set(str(len(aliases))+' alias rules');self.dirty=True;self.update()
+        self.alias_editor=AliasEditor(self.window,self.active_aliases,saved)
+
     def remove(self):
         selected=self.fields.curselection()
         if selected:self.dirty=True;self.profile['fields'].pop(selected[0]);self.field_name.set('');self.draw()
 
     def save(self):
         try:
+            if hasattr(self,'alias_editor') and self.alias_editor.window.winfo_exists():messagebox.showinfo('Alias map','Use or close the alias map editor before saving the profile.',parent=self.window);return
             if self.field_name.get().strip() and not self.update():return
             profile=validate_profile({**self.profile,'name':self.name.get().strip(),'instructions':self.instructions.get('1.0','end-1c')})
             path=filedialog.asksaveasfilename(parent=self.window,initialdir=str(self.path.parent),initialfile=self.path.name,defaultextension='.json')

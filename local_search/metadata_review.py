@@ -60,6 +60,7 @@ def _fetch(db,ident):
     return {'job':job,'profile':validate_profile(json.loads(profile[0])),'prompt':profile[1],'metadata':json.loads(job['result']) if job['result'] else None,
             'excerpts':json.loads(job['evidence'] or '[]'),'issues':json.loads(job['issues']),'overrides':overrides,'review_token':token,
             'manual_fields':manual_fields,'preserve_evidence_fields':json.loads(latest[0]).get('review_preserve_evidence_fields',[]) if latest else [],
+            'alias_changes':json.loads(latest[0]).get('alias_changes',[]) if latest else [],
             'current_values':values,'title':source[0] if source else 'Removed source','locator':source[1] if source else None,
             'stale':not current or current['source_uuid']!=job['source_uuid'] or current['text_hash']!=job['content_hash']}
 
@@ -93,16 +94,23 @@ def check_source(db,record):
         if actual!=excerpt['text']:raise ValueError('Stored evidence no longer matches the indexed document')
 
 
-def save(path,ident,metadata,token,manual_fields=(),accept=False,preserve_evidence_fields=None):
+def save(path,ident,metadata,token,manual_fields=(),accept=False,preserve_evidence_fields=None,alias_changes=None):
     with connection(path,True) as db:
         try:
             db.execute('BEGIN IMMEDIATE');record=_fetch(db,ident);job=record['job']
             if record['review_token']!=token:raise ValueError('This finding was changed elsewhere. Reload it before saving.')
             check_source(db,record)
             profile=record['profile'];names={field['name'] for field in profile['fields']}
+            from .metadata_aliases import normalise
+            metadata,fresh_aliases=normalise(metadata,profile,skip_fields=set(manual_fields)|set(record['manual_fields']))
             parsed,issues,manual_fields,preserve=prepare(record,metadata,manual_fields,preserve_evidence_fields)
             if accept and issues:raise ValueError('Fix the following before accepting: '+'; '.join(issues))
+            fresh_fields={change['field'] for change in fresh_aliases}
+            previous_changes=record['alias_changes'] if alias_changes is None else alias_changes
+            changes=[change for change in previous_changes if change['field'] not in fresh_fields]+fresh_aliases
+            changes=[change for change in changes if isinstance(parsed.get(change['field']),dict) and parsed[change['field']].get('value')==change['canonical']]
             result={'status':'accepted' if accept else 'needs_review','metadata':parsed,'issues':issues,'excerpts':record['excerpts'],
+                    'alias_changes':changes,
                     'attempts':json.loads(job['attempts']),'review_manual_fields':sorted(manual_fields),'review_preserve_evidence_fields':sorted(preserve),
                     'review_evidence_overridden':sorted(manual_fields-preserve),'review_action':'accept' if accept else 'save_draft'}
             if accept:

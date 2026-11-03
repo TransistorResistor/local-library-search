@@ -154,9 +154,11 @@ def extract(source,model,profile):
                 record['issues']=issues
                 if not issues:
                     changed=previous is not None and parsed!=previous and kind=='format_repair'
+                    from .metadata_aliases import normalise
+                    parsed,alias_changes=normalise(parsed,profile)
                     any_values=any(item is not None and item.get('value') not in ([],None,'') for item in parsed.values())
                     requires_review=repaired or changed or any(parsed[f['name']] is not None and not f.get('auto_accept',False) for f in profile['fields'])
-                    result.update(metadata=parsed,issues=[],status='unknown' if not any_values else 'needs_review' if requires_review else 'extracted')
+                    result.update(metadata=parsed,alias_changes=alias_changes,issues=[],status='unknown' if not any_values else 'needs_review' if requires_review else 'extracted')
                     if changed:result['review_reason']='Formatting repair changed parsed values'
                     elif repaired:result['review_reason']='Repaired JSON requires review; preservation cannot be proven for malformed input'
                     record['outcome']='valid';result['attempts'].append(dict(record,seconds=time.perf_counter()-call_started));break

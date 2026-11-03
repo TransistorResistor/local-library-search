@@ -52,6 +52,7 @@ class MetadataApp:
         ttk.Button(bulkbar,text='Select page',command=lambda:self.jobs.selection_set(self.jobs.get_children())).pack(side='left',padx=4)
         ttk.Button(bulkbar,text='Bulk approve…',command=lambda:self.open_bulk('approve')).pack(side='left',padx=4)
         ttk.Button(bulkbar,text='Find and replace…',command=lambda:self.open_bulk('replace')).pack(side='left',padx=4)
+        ttk.Button(bulkbar,text='Apply alias map…',command=lambda:self.open_bulk('aliases')).pack(side='left',padx=4)
         panes=ttk.Panedwindow(root,orient='horizontal');panes.pack(fill='both',expand=True,padx=12)
         left=ttk.Frame(panes);right_host=ttk.Frame(panes);panes.add(left,weight=1);panes.add(right_host,weight=3)
         self.right_canvas=tk.Canvas(right_host,highlightthickness=0);self.right_canvas.pack(side='left',fill='both',expand=True)
@@ -306,6 +307,8 @@ class MetadataApp:
         item=self.values.get(self.field['name']);quotes=item.get('evidence',[]) if isinstance(item,dict) else []
         manual=self.field['name'] in self.manual and self.field['name'] not in self.keep_quotes
         text=('Manual correction: inherited evidence is replaced. The value does not need to occur in the text.\n\n' if manual else '')+'Supporting quotes for this field:\n'+json.dumps(quotes,ensure_ascii=False,indent=2)+'\n\nOriginal excerpts (retained for history):\n'
+        changes=[change for change in self.record.get('alias_changes',[]) if change['field']==self.field['name'] and isinstance(item,dict) and item.get('value')==change['canonical']]
+        if changes:text='Alias mapping (original → preferred):\n'+json.dumps(changes,ensure_ascii=False,indent=2)+'\n\n'+text
         for excerpt in self.record['excerpts']:text+='\n'+excerpt['excerpt_id']+' · pages '+str(excerpt.get('pages',[]))+'\n'+excerpt['text']+'\n'
         self._text(self.evidence,text);ids=[e['excerpt_id'] for e in self.record['excerpts']];self.excerpt_box.configure(values=ids)
         if ids:self.excerpt.set(ids[0])

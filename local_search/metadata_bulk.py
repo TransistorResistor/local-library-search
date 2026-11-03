@@ -49,10 +49,15 @@ def replace_value(item,find,replacement,case_sensitive=False,whole=False):
     return result,matches
 
 
-def preview(path,operation,ids=None,filters=None,field=None,find='',replacement='',case_sensitive=False,whole=False,cancel=None,on_progress=None):
-    if operation not in ('approve','replace'):raise ValueError('Unknown bulk operation')
+def preview(path,operation,ids=None,filters=None,field=None,find='',replacement='',case_sensitive=False,whole=False,cancel=None,on_progress=None,alias_fields=None):
+    if operation not in ('approve','replace','aliases'):raise ValueError('Unknown bulk operation')
     if operation=='replace' and (not isinstance(find,str) or not 1<=len(find)<=1000 or not isinstance(replacement,str) or len(replacement)>4000 or not field):raise ValueError('Choose a field and enter 1–1,000 characters to find; replacement can be empty or up to 4,000 characters.')
-    plan={'operation':operation,'entries':[],'skipped':[],'target_count':0,'cancelled':False,'field':field,'find':find,'replacement':replacement,'case_sensitive':case_sensitive,'whole':whole}
+    if operation=='aliases':
+        from .metadata_profile import validate_profile
+        alias_fields=[definition for definition in (alias_fields or []) if definition.get('aliases') and (not field or definition['name']==field)]
+        if not alias_fields:raise ValueError('The chosen profile/field has no alias rules. Add and save a map first.')
+        validate_profile({'name':'bulk-alias-map','fields':alias_fields})
+    plan={'operation':operation,'entries':[],'skipped':[],'target_count':0,'cancelled':False,'field':field,'find':find,'replacement':replacement,'case_sensitive':case_sensitive,'whole':whole,'alias_fields':copy.deepcopy(alias_fields)}
     with review.connection(path) as db:
         db.execute('BEGIN')
         for ident in _targets(db,ids,filters or {}):
@@ -63,7 +68,7 @@ def preview(path,operation,ids=None,filters=None,field=None,find='',replacement=
             try:
                 record=review._fetch(db,ident);title=record['title'];status=record['job']['status']
                 if operation=='approve' and status not in REVIEWABLE:raise ValueError('Already accepted or not ready for review: '+status)
-                if operation=='replace' and status not in REVIEWABLE|{'accepted'}:raise ValueError('Not ready for editing: '+status)
+                if operation in ('replace','aliases') and status not in REVIEWABLE|{'accepted'}:raise ValueError('Not ready for editing: '+status)
                 review.check_source(db,record)
                 metadata=copy.deepcopy(record['metadata']);manual=set(record['manual_fields']);preserve=set(record['preserve_evidence_fields']);count=0
                 before=after=''
@@ -72,8 +77,17 @@ def preview(path,operation,ids=None,filters=None,field=None,find='',replacement=
                     before=canonical(metadata[field]);changed,count=replace_value(metadata[field],find,replacement,case_sensitive,whole)
                     if not count:raise ValueError('No matching value')
                     metadata[field]=changed;manual.add(field);preserve.discard(field);after=canonical(changed)
+                changed_fields={field} if operation=='replace' else set()
+                if operation=='aliases':
+                    from .metadata_aliases import normalise
+                    types={definition['name']:definition['type'] for definition in record['profile']['fields']}
+                    if any(definition['name'] in types and types[definition['name']]!=definition['type'] for definition in alias_fields):raise ValueError('Alias field type differs from this finding’s field type')
+                    metadata,changes=normalise(metadata,{'fields':alias_fields})
+                    if not changes:raise ValueError('No matching alias')
+                    changed_fields={change['field'] for change in changes};count=len(changes);manual.update(changed_fields);preserve.update(changed_fields)
+                    before=canonical({change['field']:change['original'] for change in changes});after=canonical({change['field']:change['canonical'] for change in changes})
                 parsed,issues,manual,preserve=review.prepare(record,metadata,manual,preserve)
-                blocking=issues if operation=='approve' else [issue for issue in issues if issue.startswith(field+':')]
+                blocking=issues if operation=='approve' else [issue for issue in issues if issue.split(':',1)[0] in changed_fields]
                 if blocking:raise ValueError('; '.join(blocking))
                 plan['entries'].append({'id':ident,'token':record['review_token'],'title':title,'matches':count,'before':before[:1200],'after':after[:1200],'other_issues':issues})
             except (ValueError,TypeError,KeyError) as error:plan['skipped'].append({'id':ident,'title':title,'reason':str(error)})
@@ -84,7 +98,7 @@ def preview(path,operation,ids=None,filters=None,field=None,find='',replacement=
 def apply(path,plan,cancel=None,on_progress=None):
     if plan.get('cancelled'):raise ValueError('Preview was cancelled; prepare a complete preview first')
     operation=plan.get('operation')
-    if operation not in ('approve','replace'):raise ValueError('Unknown bulk operation')
+    if operation not in ('approve','replace','aliases'):raise ValueError('Unknown bulk operation')
     result={'applied':[],'skipped':list(plan['skipped']),'cancelled':False,'remaining':0}
     for index,entry in enumerate(plan['entries']):
         if cancel is not None and cancel.is_set():result.update(cancelled=True,remaining=len(plan['entries'])-index);break
@@ -92,11 +106,18 @@ def apply(path,plan,cancel=None,on_progress=None):
             record=review.fetch(path,entry['id'])
             if record['review_token']!=entry['token']:raise ValueError('Finding changed since preview; prepare a new preview')
             metadata=copy.deepcopy(record['metadata']);manual=set(record['manual_fields']);preserve=set(record['preserve_evidence_fields'])
+            alias_changes=None
             if operation=='replace':
                 field=plan['field'];metadata[field],count=replace_value(metadata[field],plan['find'],plan['replacement'],plan['case_sensitive'],plan['whole'])
                 if not count:raise ValueError('Value no longer matches the preview')
                 manual.add(field);preserve.discard(field)
-            review.save(path,entry['id'],metadata,entry['token'],manual,operation=='approve',preserve)
+            elif operation=='aliases':
+                from .metadata_aliases import normalise
+                metadata,changes=normalise(metadata,{'fields':plan['alias_fields']})
+                if not changes:raise ValueError('Value no longer matches an alias')
+                changed_fields={change['field'] for change in changes};manual.update(changed_fields);preserve.update(changed_fields)
+                alias_changes=[change for change in record['alias_changes'] if change['field'] not in changed_fields]+changes
+            review.save(path,entry['id'],metadata,entry['token'],manual,operation=='approve',preserve,alias_changes)
             result['applied'].append({'id':entry['id'],'title':entry['title']})
         except (ValueError,TypeError,KeyError,sqlite3.Error) as error:result['skipped'].append({'id':entry['id'],'title':entry['title'],'reason':str(error)})
         if on_progress:on_progress(index+1)
