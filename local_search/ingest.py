@@ -221,11 +221,29 @@ class HTMLText(HTMLParser):
     def __init__(self):super().__init__();self.parts=[];self.hidden=0
     def handle_starttag(self,tag,attrs):
         if tag in ('script','style'):self.hidden+=1
-        if tag in ('p','div','br','li','h1','h2','h3'):self.parts.append('\n\n')
+        if not self.hidden and tag in ('p','div','br','li','h1','h2','h3','h4','h5','h6','tr','section','article'):self.parts.append('\n\n')
     def handle_endtag(self,tag):
         if tag in ('script','style'):self.hidden=max(0,self.hidden-1)
+        elif not self.hidden and tag in ('p','div','li','h1','h2','h3','h4','h5','h6','tr','section','article'):self.parts.append('\n\n')
     def handle_data(self,text):
         if not self.hidden:self.parts.append(text)
+
+
+def clip_text(row):
+    """Index the stored HTML body plus distinct plain-text content, without assets."""
+    plain=(row.get('content_text') or '').replace('\x00','').strip()
+    html=row.get('content_html') or ''
+    if not html:return plain
+    parser=HTMLText();parser.feed(html);parser.close()
+    body=''.join(parser.parts).replace('\x00','').strip()
+    if not body:return plain
+    # Plain text is often a differently wrapped copy or summary of the HTML.
+    normal=lambda value:' '.join(value.split())
+    if not plain or normal(plain) in normal(body):return body
+    if normal(body) in normal(plain):return plain
+    seen={normal(part) for part in re.split(r'\n\s*\n',body) if part.strip()}
+    extra=[part.strip() for part in re.split(r'\n\s*\n',plain) if part.strip() and normal(part) not in seen]
+    return '\n\n'.join([body]+extra)
 
 
 @contextmanager
@@ -323,9 +341,7 @@ def ingest_clipper(library,config,on_progress=None,on_failure=None,inventory=Non
                 check_cancel(cancel_event)
                 key=str(row['id']);seen.add(key)
                 progress.emit('Processing clip (commit pending)',str(path)+'#clip='+key,force=True)
-                text=row['content_text'] or ''
-                if not text.strip() and row['content_html']:
-                    parser=HTMLText();parser.feed(row['content_html']);text=''.join(parser.parts).strip()
+                text=clip_text(row)
                 status='indexed' if text.strip() else 'skipped'
                 library.put(collection,key,row['title'] or '',row['canonical_url'] or row['url'] or str(path)+'#clip='+key,
                     [{'text':text,'page':None}] if text else [],byte_hash=sha(text),

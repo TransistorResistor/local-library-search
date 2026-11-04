@@ -14,6 +14,14 @@ python -m local_search.metadata profile --profile metadata-profile.json
 
 Supported types: string, number, integer, boolean, date, string_list, date_list and interval_list. String fields/lists can have allowed `enum` values. Dates preserve year/month/day precision; cutoff dates and reporting intervals carry scopes. Generated keywords are labelled suggestions. Every factual field requires quoted evidence by default. `auto_accept` is initially false in the starter; literal quote matching does not establish correct interpretation.
 
+### Auto-accept and manual review
+
+In **Extraction controls → Edit fields / prompts**, enable auto-accept for fields you want to accept automatically, then save the profile and queue work with that saved version. The default profile requires review for every populated field. Editing the profile does not change jobs already queued with an older version.
+
+Auto-accept still requires valid field types, allowed values and evidence. Currently the decision is made for the whole result: if any non-null field has `auto_accept: false`, the job and all its populated fields remain `needs_review`, including fields whose own auto-accept option is enabled. If every populated field allows auto-accept and validation succeeds, the job is `extracted` and its stored field values are `accepted`; you do not need to approve that job manually. Null fields do not prevent auto-accept, and an entirely empty result is `unknown`.
+
+JSON formatting repairs always require review, even when all fields allow auto-accept. Unresolved validation errors block approval; failed extraction is not accepted. Alias normalisation alone does not force review or change this policy. Existing manual overrides are preserved during extraction. Dry runs only report these outcomes; they never save accepted values into the library. Use the review GUI to inspect/edit individual findings or preview a bulk approval of valid findings.
+
 A non-null field is a value/evidence object. For example, a publication-date field may return:
 
 ```json
