@@ -183,13 +183,16 @@ def commit_result(library,job,result,profile):
             for field in profile['fields']:
                 name=field['name'];value=metadata[name]
                 if name in bad or value is None:continue
-                if db.execute('SELECT 1 FROM metadata_overrides WHERE source_uuid=? AND field=?',(job['source_uuid'],name)).fetchone():
-                    result['preserved_manual_fields'].append(name);continue
+                overridden=db.execute('SELECT 1 FROM metadata_overrides WHERE source_uuid=? AND field=?',(job['source_uuid'],name)).fetchone()
+                if overridden:
+                    if result.get('review_action')!='accept':
+                        result['preserved_manual_fields'].append(name);continue
+                    db.execute('UPDATE metadata_overrides SET value=?,updated_at=? WHERE source_uuid=? AND field=?',(canonical(value),time.time(),job['source_uuid'],name))
                 status='accepted' if state=='accepted' else 'needs_review' if state=='needs_review' or not field.get('auto_accept',False) else 'accepted'
                 db.execute('''INSERT INTO metadata_values VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(source_uuid,field) DO UPDATE SET
                   content_hash=excluded.content_hash,profile_hash=excluded.profile_hash,value=excluded.value,status=excluded.status,
                   origin=excluded.origin,job_id=excluded.job_id,updated_at=excluded.updated_at''',
-                  (job['source_uuid'],name,job['content_hash'],job['profile_hash'],canonical(value),status,'generated' if field.get('generated') else 'normalised' if any(change['field']==name for change in result.get('alias_changes',[])) else 'extracted',job['id'],time.time()))
+                  (job['source_uuid'],name,job['content_hash'],job['profile_hash'],canonical(value),status,'manual' if overridden else 'generated' if field.get('generated') else 'normalised' if any(change['field']==name for change in result.get('alias_changes',[])) else 'extracted',job['id'],time.time()))
                 result['committed_fields'].append(name)
         db.execute('INSERT INTO metadata_runs VALUES(?,?,?,?,?)',(str(uuid.uuid4()),job['id'],job.get('model_hash'),canonical(result),time.time()))
         return state

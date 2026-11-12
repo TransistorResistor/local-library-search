@@ -46,6 +46,11 @@ class RetrievalProgress:
     def __init__(self):self.passages=set();self.ranges={};self.sources=set();self.stalled=0
     def observe(self,name,result):
         from .store import canonical,sha
+        if isinstance(result,dict) and 'batch' in result:
+            stalled=self.stalled;novel=False
+            for item in result['batch']:novel=self.observe(name,item['result']) or novel
+            self.stalled=0 if novel else stalled+1
+            return novel
         novel=False
         if isinstance(result,dict):
             for hit in result.get('results',[]):

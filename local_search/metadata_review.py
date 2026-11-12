@@ -116,11 +116,12 @@ def save(path,ident,metadata,token,manual_fields=(),accept=False,preserve_eviden
             if accept:
                 commit_result(SimpleNamespace(db=db),job,result,profile)
                 for name in names:
-                    if name not in manual_fields and (parsed[name] is not None or name in record['overrides']):continue
+                    if name not in manual_fields and parsed[name] is not None and name not in record['overrides']:continue
                     value=canonical(parsed[name]);now=time.time()
-                    if name in manual_fields:db.execute('INSERT INTO metadata_overrides VALUES(?,?,?,?) ON CONFLICT(source_uuid,field) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at',(job['source_uuid'],name,value,now))
+                    protected=name in manual_fields or name in record['overrides']
+                    if protected:db.execute('INSERT INTO metadata_overrides VALUES(?,?,?,?) ON CONFLICT(source_uuid,field) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at',(job['source_uuid'],name,value,now))
                     db.execute('INSERT INTO metadata_values VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(source_uuid,field) DO UPDATE SET content_hash=excluded.content_hash,profile_hash=excluded.profile_hash,value=excluded.value,status=excluded.status,origin=excluded.origin,job_id=excluded.job_id,updated_at=excluded.updated_at',
-                               (job['source_uuid'],name,job['content_hash'],job['profile_hash'],value,'accepted','manual' if name in manual_fields else 'extracted',ident,now))
+                               (job['source_uuid'],name,job['content_hash'],job['profile_hash'],value,'accepted','manual' if protected else 'extracted',ident,now))
             else:
                 # A review draft is a proposal. It must never publish field values.
                 db.execute("UPDATE metadata_jobs SET status='needs_review',result=?,issues=?,updated_at=? WHERE id=?",(canonical(parsed),canonical(issues),time.time(),ident))

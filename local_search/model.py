@@ -77,9 +77,14 @@ class GGUF:
                     memory_note='System RAM and dedicated VRAM are separate. Shared GPU memory uses system RAM; throughput alone does not verify layer placement.')
 
     def tokens(self,messages):
+        key=(self.thinking,json.dumps(messages,ensure_ascii=False,separators=(',',':')))
+        cached=getattr(self,'_prompt_cache',None)
+        if cached is not None and cached[0]==key:return cached[1]
         rendered=self.formatter(messages=messages,enable_thinking=self.thinking)
         # The template already adds model-specific special tokens. Pass token IDs directly to generation.
-        return self.llm.tokenize(rendered.prompt.encode('utf-8'),add_bos=False,special=True),rendered
+        result=(self.llm.tokenize(rendered.prompt.encode('utf-8'),add_bos=False,special=True),rendered)
+        self._prompt_cache=(key,result)
+        return result
 
     def count(self,messages):return len(self.tokens(messages)[0])
 
@@ -98,7 +103,10 @@ class GGUF:
         constrained=False
         if json_schema is not None and not self.thinking:
             from llama_cpp import LlamaGrammar
-            options['grammar']=LlamaGrammar.from_json_schema(json.dumps(json_schema),verbose=False);constrained=True
+            schema_text=json.dumps(json_schema)
+            if getattr(self,'_grammar_key',None)!=schema_text:
+                self._grammar=LlamaGrammar.from_json_schema(schema_text,verbose=False);self._grammar_key=schema_text
+            options['grammar']=self._grammar;constrained=True
         runtime_started=time.perf_counter()
         if on_event is None:
             response=self.llm.create_completion(**options)

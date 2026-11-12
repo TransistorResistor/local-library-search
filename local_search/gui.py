@@ -60,7 +60,9 @@ class App:
         style=ttk.Style(root);style.configure('TNotebook.Tab',padding=(12,6))
         top=ttk.Frame(root,padding=(14,10));top.pack(fill='x')
         ttk.Label(top,text='Local Library Search',font=('Segoe UI',16,'bold')).pack(side='left')
-        ttk.Label(top,text='Native desktop · local files · local model').pack(side='right')
+        self.model_status=tk.StringVar(value='Model: not loaded')
+        ttk.Label(top,textvariable=self.model_status).pack(side='right')
+        ttk.Button(top,text='Metadata review…',command=self.launch_metadata_review).pack(side='right',padx=8)
         self.stop=ttk.Button(top,text='Stop operation',command=self.cancel.set,state='disabled');self.stop.pack(side='right',padx=10)
         self.status_label=ttk.Label(root,textvariable=self.status,padding=(14,8),wraplength=1050)
         self.status_label.pack(side='bottom',fill='x')
@@ -119,7 +121,8 @@ class App:
         self.button(sync_actions,'Sync now',self.sync_now,side='left',padx=5)
         self.button(sync_actions,'Load published copy',self.load_published,side='left',padx=5)
         ttk.Label(library_page,text='Network libraries use a local AppData copy. Existing remote libraries must be closed exports. Conflicting changes are retained for review.',wraplength=760).pack(anchor='w',pady=4)
-        prefs=ttk.Frame(preferences);prefs.pack(fill='x');prefs.columnconfigure(1,weight=1)
+        from .gui_widgets import disclosure
+        prefs=disclosure(preferences,'Advanced preferences');prefs.pack(fill='x');prefs.columnconfigure(1,weight=1)
         self.vars['legacy_comparison']=self.legacy_policy
         ttk.Checkbutton(prefs,text='Legacy answer policy (advanced comparison)',variable=self.legacy_policy,command=self.effort_changed).grid(row=7,column=0,columnspan=3,sticky='w')
         self.entry(prefs,0,'Notebook token limit (64–32768)','note_tokens',self.raw.get('agent_options',{}).get('note_tokens',6000))
@@ -155,6 +158,7 @@ class App:
         model=ttk.LabelFrame(model_page,text='Local GGUF model',padding=8);model.pack(fill='x',pady=8);model.columnconfigure(1,weight=1)
         cfg=self.raw.get('model',{})
         self.entry(model,0,'GGUF file','path',cfg.get('path',''),'file')
+        model=disclosure(model,'Advanced model settings');model.columnconfigure(1,weight=1)
         self.entry(model,1,'PyTorch DLL folder (optional)','torch_lib',cfg.get('torch_lib',''),'dir')
         for row,label,key,default in [(2,'Total context tokens','context',12000),(3,'Output reserve, including thinking','output',2000),(4,'GPU layers (0 = CPU, -1 = all)','gpu_layers',0)]:self.entry(model,row,label,key,cfg.get(key,default))
         ttk.Button(model,text='Use 64k total / 8k output reserve',command=lambda:(self.vars['context'].set('65536'),self.vars['output'].set('8192'))).grid(row=7,column=0,columnspan=3,sticky='w')
@@ -606,6 +610,9 @@ class App:
             self.results.put((result,error,callback))
 
     def poll(self):
+        if hasattr(self,'model_status'):
+            name=Path(json.loads(self.model_key).get('path','')).name if self.model is not None and self.model_key else ''
+            self.model_status.set('Model loaded: '+name if self.model is not None else 'Model: not loaded')
         if self.ingesting:self.display_ingest_progress()
         # A fixed-size queue plus batched UI writes bounds streaming overhead and memory.
         text=[];thought=[]

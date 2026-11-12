@@ -22,8 +22,9 @@ def source_version(library,ident):
 
 
 def fragments(results,citations):
+    from .evidence import leaves
     cited=set(citations)
-    for result in results:
+    for result in (leaf for item in results for leaf in leaves(item)):
         if not isinstance(result,dict):continue
         for hit in result.get('results',[]):
             if not isinstance(hit,dict) or not isinstance(hit.get('text'),str) or 'passage_id' not in hit:continue

@@ -64,7 +64,17 @@ Use raw `query` for advanced expressions such as prefixes or nested Boolean grou
 {"action":"search","query":"(\"export control\" OR \"trade restriction\") NOT draft","limit":5}
 ```
 
-Simple query input is another supported alternative. Whitespace words are ANDed and quoted phrases stay together; punctuation is escaped by the host. Unmatched phrase quotes are errors.
+Simple query input is another supported alternative. Whitespace words are ANDed and quoted phrases stay together; punctuation is escaped by the host. Standalone dash/punctuation separators are ignored. Unmatched phrase quotes are errors. Advanced input also quotes punctuated bare terms such as `ABC-123`, `COVID–19`, `R&D` and `C++`, while preserving Boolean, prefix and NEAR syntax. Matching is token-based, not character-exact; malformed Boolean expressions still fail explicitly.
+
+### Reducing inference rounds
+
+Use `{"action":"search_many","queries":[{"query":"ABC-123"},{"query":"pressure"}]}` for independent searches, or `{"action":"context_many","requests":[{"passage_id":1,"doc_id":1},{"passage_id":2,"doc_id":2}]}` for independent context reads. Each batch accepts 1–4 argument objects and consumes one model response. Each returned `batch` item includes `request_index` and `result`; individual failures do not discard successful siblings. Pagination belongs to each child result. Context-budget trimming is explicit, including omitted request indices when necessary. A batch is one evidence ID for coverage and notebook purposes.
+
+Retrieval actions (`search`, `context`, `document` and both batch actions) accept `save:true` to pin returned evidence without a separate notebook response. A `save_error` means retrieval succeeded but the notebook/context limit prevented pinning. Cancellation is checked between batch members.
+
+Agent searches omit exact totals unless `exact_count:true` is requested. Direct search and CLI count settings retain their existing defaults. Model evidence is compact, with source metadata shared within an evidence item and paths/scores/timings omitted; full records remain in the trace. `recent_results` contains all visible evidence once, in evidence-ID order. `saved_evidence`, `previous_turn_evidence` and `coverage_evidence` contain IDs rather than duplicated excerpts. `allowed_citation_ids` lists source IDs eligible for citation, not claims of factual support.
+
+Non-thinking native model rounds use JSON grammar constraints, including allowed citation IDs; host-side citation/evidence validation still applies. Thinking rounds remain unconstrained, except the existing first-turn JSON and repair options. Finalisation restricts the non-thinking grammar to answers. Formatted prompt/token IDs and notebook token counts are cached until their inputs change. Evidence is serialized before mutable notebook/coverage state so retaining evidence does not invalidate its existing prompt prefix; eviction and checkpoints can still invalidate prefixes.
 
 ```json
 {"action":"search","query":"ABC-123 approval","input_mode":"simple","limit":5}

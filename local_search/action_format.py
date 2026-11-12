@@ -2,7 +2,7 @@
 import json
 
 
-def action_schema():
+def action_schema(citation_ids=None):
     text={'type':'string'};integer={'type':'integer'}
     strings={'type':'array','items':text}
     coverage={'type':'array','maxItems':12,'items':{'type':'object','properties':{
@@ -11,7 +11,7 @@ def action_schema():
     def action(name,properties,required=()):
         return {'type':'object','properties':{'action':{'const':name},**properties,'coverage':coverage},
                 'required':['action',*required],'additionalProperties':False}
-    return {'anyOf':[
+    schema={'anyOf':[
         action('search',{'query':text,'all':strings,'any':strings,'exclude':strings,
             'near':{'type':'object','properties':{'terms':strings,'distance':integer},'required':['terms'],'additionalProperties':False},
             'limit':integer,'offset':integer,'date_field':{'type':'string','enum':['added_at','modified_at','published_at']},
@@ -22,6 +22,19 @@ def action_schema():
         action('document',{'doc_id':integer,'start_char':integer,'count_chars':integer},['doc_id']),
         action('save_note',{'evidence_id':integer},['evidence_id']),action('remove_note',{'evidence_id':integer},['evidence_id']),
         action('checkpoint',{}),action('answer',{'answer':text,'citations':{'type':'array','items':integer},'gaps':strings},['answer','citations'])]}
+    if citation_ids is not None:
+        citations=schema['anyOf'][-1]['properties']['citations']
+        if citation_ids:citations['items']={'type':'integer','enum':sorted(citation_ids)}
+        else:citations['maxItems']=0
+    for name,single,field in [('search_many','search','queries'),('context_many','context','requests')]:
+        original=next(item for item in schema['anyOf'] if item['properties']['action']['const']==single)
+        properties={key:value for key,value in original['properties'].items() if key not in ('action','coverage')}
+        schema['anyOf'].append(action(name,{field:{'type':'array','minItems':1,'maxItems':4,'items':{
+            'type':'object','properties':properties,'required':[key for key in original['required'] if key!='action'],'additionalProperties':False}}},[field]))
+    for item in schema['anyOf']:
+        if item['properties']['action']['const'] in ('search','context','document','search_many','context_many'):
+            item['properties']['save']={'type':'boolean'}
+    return schema
 
 
 def constrained(model,messages,schema,on_event=None):

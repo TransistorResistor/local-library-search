@@ -1,4 +1,6 @@
-"""Compile literal search input into FTS5, without repairing advanced queries."""
+"""Compile literals and protect punctuated terms while preserving FTS operators."""
+import re
+import unicodedata
 
 FIELDS={'all','any','exclude','near'}
 
@@ -30,7 +32,22 @@ def simple_terms(text):
             start=i
             while i<len(text) and not text[i].isspace():i+=1
             terms.append(text[start:i])
-    return terms
+    return [term for term in terms if any(c.isalnum() for c in term)]
+
+
+def punctuation_safe(query):
+    # Leave quoted phrases and FTS syntax intact. A dash is a separator inside
+    # a literal, never FTS5's column-exclusion operator in this text-only index.
+    query=query.translate(str.maketrans({'“':'"','”':'"','‘':"'",'’':"'"}))
+    pieces=re.findall(r'"(?:[^"]|"")*"|"[^"]*$|[^\s(){}:,*^]+|.',query)
+    output=[]
+    for piece in pieces:
+        if piece.startswith('"') or piece in '(){}:,+*^':output.append(piece);continue
+        punctuated=any(unicodedata.category(c).startswith(('P','S')) for c in piece)
+        if punctuated:
+            output.append(literal(piece) if any(c.isalnum() for c in piece) else ' ')
+        else:output.append(piece)
+    return ''.join(output)
 
 
 def compile_query(query=None,input_mode='advanced',**fields):
@@ -61,12 +78,13 @@ def compile_query(query=None,input_mode='advanced',**fields):
         if negative:compiled='('+compiled+') NOT ('+' OR '.join(negative)+')'
     elif input_mode=='simple':
         terms=simple_terms(query)
+        if not terms:raise ValueError('Search must contain a word or number')
         if len(terms)>48:raise ValueError('Use at most 48 words/phrases')
         compiled=' AND '.join(literal(term) for term in terms)
     else:
         if not isinstance(query,str) or not query.strip() or len(query)>4000 or '\x00' in query:
             raise ValueError('query must be a nonempty FTS5 string of at most 4000 characters')
-        compiled=query
+        compiled=punctuation_safe(query)
     if len(compiled)>4000:raise ValueError('Compiled query exceeds 4000 characters; use fewer literals')
     return compiled
 

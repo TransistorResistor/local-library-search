@@ -71,7 +71,9 @@ class MetadataApp:
         self.field_issue=tk.StringVar();ttk.Label(right,textvariable=self.field_issue,wraplength=720,foreground='#9b381e').pack(anchor='w')
         self.editor=ttk.LabelFrame(right,text='Edit finding',padding=8);self.editor.pack(fill='x',pady=8)
         self.unknown=tk.BooleanVar();ttk.Checkbutton(self.editor,text='Unknown / no value',variable=self.unknown).pack(anchor='w')
-        ttk.Checkbutton(self.editor,text='Edit raw field JSON',variable=self.raw_mode,command=self.reload_field).pack(anchor='w')
+        from .gui_widgets import disclosure
+        advanced=disclosure(self.editor,'Advanced field editing')
+        ttk.Checkbutton(advanced,text='Edit raw field JSON',variable=self.raw_mode,command=self.reload_field).pack(anchor='w')
         self.value_text=ScrolledText(self.editor,height=3,wrap='word',font=('Segoe UI',10));self.value_text.pack(fill='x',pady=4)
         self.value_text.bind('<KeyRelease>',lambda event:self.unknown.set(False) if self.value_text.get('1.0','end-1c').strip() else None)
         self.value_text.bind('<<Modified>>',self.value_changed)
@@ -91,21 +93,20 @@ class MetadataApp:
         row=ttk.Frame(self.list_frame);row.pack(fill='x')
         for label,command in [('Add date / period',self.add_list_item),('Update selected',lambda:self.add_list_item(True)),('Remove selected',self.remove_list_item)]:ttk.Button(row,text=label,command=command).pack(side='left',padx=3)
         self.list_values=[];self.help=tk.StringVar();self.help_label=ttk.Label(self.editor,textvariable=self.help,wraplength=700);self.help_label.pack(anchor='w',pady=4)
-        ttk.Button(self.editor,text='Apply field edit',command=self.apply_field).pack(anchor='w')
+        ttk.Label(self.editor,text='Edits apply when you change fields or accept.').pack(anchor='w')
         ttk.Button(self.editor,text='Reset field to unknown',command=self.reset_field).pack(anchor='w')
         self.details=ttk.Notebook(right);self.details.pack(fill='both',expand=True)
         evidence_page=ttk.Frame(self.details);attempt_page=ttk.Frame(self.details);self.details.add(evidence_page,text='Evidence');self.details.add(attempt_page,text='Attempts / prompt')
         self.evidence=ScrolledText(evidence_page,wrap='word',height=8,state='disabled');self.evidence.pack(fill='both',expand=True)
         self.attempts=ScrolledText(attempt_page,wrap='word',height=8,state='disabled');self.attempts.pack(fill='both',expand=True)
         self.quote=tk.StringVar();self.excerpt=tk.StringVar()
-        evidence_bar=ttk.Frame(evidence_page);evidence_bar.pack(fill='x',pady=4)
+        evidence_bar=disclosure(evidence_page,'Edit supporting quotes')
         self.excerpt_box=ttk.Combobox(evidence_bar,textvariable=self.excerpt,state='readonly',width=5);self.excerpt_box.pack(side='left')
         ttk.Entry(evidence_bar,textvariable=self.quote).pack(side='left',fill='x',expand=True,padx=4)
         ttk.Button(evidence_bar,text='Use quote',command=self.set_quote).pack(side='left');ttk.Button(evidence_bar,text='Clear quotes',command=self.clear_quotes).pack(side='left',padx=4)
         actions=ttk.Frame(root,padding=12);actions.pack(side='bottom',fill='x',before=panes)
         self.save_button=ttk.Button(actions,text='Save draft',command=lambda:self.save(False));self.save_button.pack(side='left')
-        self.accept_button=ttk.Button(actions,text='Accept finding',command=lambda:self.save(True));self.accept_button.pack(side='left',padx=8)
-        ttk.Button(actions,text='Accept and next',command=lambda:self.save(True,advance=True)).pack(side='left',padx=8)
+        self.accept_button=ttk.Button(actions,text='Accept and next',command=lambda:self.save(True,advance=True));self.accept_button.pack(side='left',padx=8)
         ttk.Button(actions,text='Open original',command=self.open_original).pack(side='left',padx=8)
         ttk.Label(actions,text='Manual edits replace inherited quotes and become protected corrections when accepted.',wraplength=600).pack(side='left',padx=12)
         status_label=ttk.Label(root,textvariable=self.status,padding=(12,4),wraplength=1100);status_label.pack(side='bottom',fill='x',before=panes)
@@ -331,7 +332,7 @@ class MetadataApp:
     def save(self,accept=False,advance=False):
         if self.busy or not self.record or not self.apply_field():return
         if len(self.jobs.selection())>1:self.status.set('Use Bulk approve for multiple selected findings.');return
-        if accept and not messagebox.askyesno('Accept finding','Accept these values? Edited fields will be stored as protected manual corrections.',parent=self.root):return
+        if accept and not messagebox.askyesno('Accept finding',str(sum(self.values.get(name)!=item.get('value') for name,item in self.record.get('current_values',{}).items()))+' existing field values will change. Accept these values and replace conflicts, including previous manual corrections?',parent=self.root):return
         rows=list(self.jobs.get_children());position=rows.index(self.record['job']['id']) if self.record['job']['id'] in rows else 0
         next_position=position+1 if self.filter.get() in ('all','accepted') else position
         ident=self.record['job']['id'];token=self.record['review_token'];values=copy.deepcopy(self.values);manual=set(self.manual);keep=set(self.keep_quotes)
