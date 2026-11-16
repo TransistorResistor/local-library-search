@@ -69,7 +69,7 @@ def preview(path,operation,ids=None,filters=None,field=None,find='',replacement=
                 record=review._fetch(db,ident);title=record['title'];status=record['job']['status']
                 if operation=='approve' and status not in REVIEWABLE:raise ValueError('Already accepted or not ready for review: '+status)
                 if operation in ('replace','aliases') and status not in REVIEWABLE|{'accepted'}:raise ValueError('Not ready for editing: '+status)
-                review.check_source(db,record)
+                review.check_source(db,record,verify_excerpts=operation!='approve')
                 metadata=copy.deepcopy(record['metadata']);manual=set(record['manual_fields']);preserve=set(record['preserve_evidence_fields']);count=0
                 before=after=''
                 if operation=='replace':
@@ -86,6 +86,8 @@ def preview(path,operation,ids=None,filters=None,field=None,find='',replacement=
                     if not changes:raise ValueError('No matching alias')
                     changed_fields={change['field'] for change in changes};count=len(changes);manual.update(changed_fields);preserve.update(changed_fields)
                     before=canonical({change['field']:change['original'] for change in changes});after=canonical({change['field']:change['canonical'] for change in changes})
+                if operation=='approve':
+                    manual={field['name'] for field in record['profile']['fields']};preserve=set()
                 parsed,issues,manual,preserve=review.prepare(record,metadata,manual,preserve)
                 blocking=issues if operation=='approve' else [issue for issue in issues if issue.split(':',1)[0] in changed_fields]
                 if blocking:raise ValueError('; '.join(blocking))

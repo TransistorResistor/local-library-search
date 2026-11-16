@@ -5,6 +5,7 @@ from .model import parse_action
 from .prompts import load_prompt
 import hashlib
 import copy
+from datetime import datetime, timezone
 from .policy import MODES,GUIDANCE as COMPLETION_GUIDANCE,coverage_update,source_ids,RetrievalProgress
 from .query import normalise_search
 from .evidence import compact,leaves
@@ -28,6 +29,8 @@ def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,pr
     started=time.perf_counter()
     stages={'model_seconds':0.0,'fts_search_seconds':0.0,'catalog_seconds':0.0,'context_seconds':0.0,'document_seconds':0.0,'notes_seconds':0.0,'other_tools_seconds':0.0}
     system_prompt=load_prompt('search.system',prompts_file)
+    current_date=datetime.now(timezone.utc).date().isoformat()
+    system_prompt+='\nCurrent date (UTC): '+current_date+'. Interpret relative dates against this date unless the user specifies another reference date. For recently published documents use published_at, not added_at or modified_at. Unknown publication dates do not establish recency. If recently is ambiguous, state the date range you use or ask the user when it materially affects the answer.'
     if history:system_prompt+='\nEarlier messages provide conversational context only, not verified source evidence. Resolve follow-up references using that context, but use retrieved or revalidated source evidence for factual citations. Earlier answers can be incomplete or outdated. Older conversation may have been omitted to fit the context.'
     if prior_evidence:system_prompt+='\nprevious_turn tool results are retained source excerpts, revalidated against the current library. You may use and cite them directly while visible; retrieve additional evidence for new needs. Revalidation means those excerpts are unchanged; it does not establish that no newer contradictory documents exist. They are a bounded selection, not the full previous document or an exhaustive update check.'
     if steering is not None:system_prompt+='\nThe user_steering list contains later instructions from the user for this question, in order. Apply them alongside the original question; later corrections take precedence. They persist through checkpoints. Reassess coverage after a correction and keep using retrieved evidence.'
@@ -55,7 +58,7 @@ def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,pr
             # Split search-tool wall time into lexical SQL and reranking/shortlist work.
             stages['rerank_seconds']=min(stages['fts_search_seconds'],searcher.rerank_seconds)
             stages['fts_search_seconds']-=stages['rerank_seconds']
-        result['prompt']={'section':'search.system','sha256':hashlib.sha256(system_prompt.encode('utf-8')).hexdigest()}
+        result['prompt']={'section':'search.system','sha256':hashlib.sha256(system_prompt.encode('utf-8')).hexdigest(),'current_date':current_date,'date_timezone':'UTC'}
         ids=result.get('citations',[])
         result['sources']=[]
         for ident in dict.fromkeys(ids):

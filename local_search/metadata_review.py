@@ -86,8 +86,9 @@ def prepare(record,metadata,manual_fields=(),preserve_evidence_fields=None):
     return parsed,issues,manual,preserve&manual
 
 
-def check_source(db,record):
+def check_source(db,record,verify_excerpts=True):
     if record['stale'] or record['job']['status']=='stale':raise ValueError('The source changed or was removed; extract a fresh finding before accepting it.')
+    if not verify_excerpts:return
     source=db.execute('SELECT doc_id FROM sources WHERE source_uuid=?',(record['job']['source_uuid'],)).fetchone()
     for excerpt in record['excerpts']:
         actual=db.execute('SELECT substr(text,?,?) FROM documents WHERE id=?',(excerpt['start_char']+1,len(excerpt['text']),source[0])).fetchone()[0]
@@ -99,8 +100,13 @@ def save(path,ident,metadata,token,manual_fields=(),accept=False,preserve_eviden
         try:
             db.execute('BEGIN IMMEDIATE');record=_fetch(db,ident);job=record['job']
             if record['review_token']!=token:raise ValueError('This finding was changed elsewhere. Reload it before saving.')
-            check_source(db,record)
+            check_source(db,record,verify_excerpts=not accept)
             profile=record['profile'];names={field['name'] for field in profile['fields']}
+            if accept:
+                # Explicit approval confirms every displayed field independently
+                # of generated quotes. Preserve original evidence in run history.
+                manual_fields=names
+                preserve_evidence_fields=()
             from .metadata_aliases import normalise
             metadata,fresh_aliases=normalise(metadata,profile,skip_fields=set(manual_fields)|set(record['manual_fields']))
             parsed,issues,manual_fields,preserve=prepare(record,metadata,manual_fields,preserve_evidence_fields)
