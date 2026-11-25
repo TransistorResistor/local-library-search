@@ -136,7 +136,7 @@ class GGUF:
         response['reserved_total']=len(tokens)+self.output
         if json_schema is not None:response['json_schema_constrained']=constrained
         self.last_timing=dict(timing)
-        if on_event:on_event({'type':'stream_end'})
+        if on_event:on_event({'type':'stream_end','approx_decode_tokens_per_second':timing.get('approx_decode_tokens_per_second')})
         return response
 
 

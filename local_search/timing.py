@@ -18,7 +18,9 @@ def complete_timing(result,clicked,submitted,worker_started,worker_finished,rend
     stages['UI delivery / polling']=render_started-worker_finished
     stages['Final answer rendering']=completed-render_started
     first=next((c.get('timings',{}).get('first_output_seconds') for c in checks if c.get('timings',{}).get('first_output_seconds') is not None),None)
-    return {'click_to_complete_seconds':completed-clicked,'stages_seconds':stages,
+    rates=[c.get('timings',{}).get('approx_decode_tokens_per_second') for c in checks]
+    return {'approx_decode_tokens_per_second_by_generation':rates,
+            'click_to_complete_seconds':completed-clicked,'stages_seconds':stages,
             'first_generation_output_seconds':first,'status':result['status'],
             'model_rounds':agent['model_rounds']}
 
@@ -30,4 +32,6 @@ def format_timing(timing):
     text+=f"\nModel rounds: {timing['model_rounds']}"
     if timing['first_generation_output_seconds'] is not None:
         text+=f"\nFirst generation request → first output: {timing['first_generation_output_seconds']:.3f}s (included above)"
+    for index,rate in enumerate(timing.get('approx_decode_tokens_per_second_by_generation',[]),1):
+        if rate is not None:text+=f'\nGeneration {index}: ~{rate:.1f} decode tok/s'
     return text

@@ -131,7 +131,7 @@ def main():
                     if args.max_rounds is not None and not 1<=args.max_rounds<=100:raise ValueError('max-rounds must be 1..100')
                     rerank_config=RerankConfig(**config.get('reranker',{}))
                     reranker=Reranker(rerank_config) if rerank_config.enabled else None
-                    try:result=ask_library(library,model,args.question,max_rounds=args.max_rounds,prompts_file=config.get('prompts_file'),reranker=reranker,note_tokens=args.note_tokens if args.note_tokens is not None else config.get('agent_options',{}).get('note_tokens',6000),effort=args.effort or config.get('agent_options',{}).get('effort','legacy'),first_turn_json=config.get('agent_options',{}).get('first_turn_json',False),repair_invalid_json=config.get('agent_options',{}).get('repair_invalid_json',False))
+                    try:result=ask_library(library,model,args.question,max_rounds=args.max_rounds,prompts_file=config.get('prompts_file'),reranker=reranker,note_tokens=args.note_tokens if args.note_tokens is not None else config.get('agent_options',{}).get('note_tokens',6000),effort=args.effort or config.get('agent_options',{}).get('effort','legacy'),first_turn_json=config.get('agent_options',{}).get('first_turn_json',False),repair_invalid_json=config.get('agent_options',{}).get('repair_invalid_json',True))
                     finally:
                         if reranker:reranker.close()
                     if args.trace:

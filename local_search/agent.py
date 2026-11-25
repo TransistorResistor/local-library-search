@@ -15,7 +15,7 @@ from .evidence import compact,leaves
 def packed(value):return json.dumps(value,ensure_ascii=False,separators=(',',':'))
 
 
-def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,prompts_file=None,reranker=None,effort='legacy',steering=None,conversation_history=None,prior_evidence=None,first_turn_json=False,repair_invalid_json=False):
+def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,prompts_file=None,reranker=None,effort='legacy',steering=None,conversation_history=None,prior_evidence=None,first_turn_json=False,repair_invalid_json=True):
     if type(first_turn_json) is not bool or type(repair_invalid_json) is not bool:raise ValueError("JSON options must be boolean")
     history=[]
     for item in (conversation_history or [])[-40:]:
@@ -82,7 +82,7 @@ def ask(library,model,question,max_rounds=None,note_tokens=6000,on_event=None,pr
     return result
 
 
-def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages,searcher,effort,steering=None,history=None,carried=None,first_turn_json=False,repair_invalid_json=False):
+def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,stages,searcher,effort,steering=None,history=None,carried=None,first_turn_json=False,repair_invalid_json=True):
     conversation=list(history or []);history_trimmed=0;base_relevance=searcher.question if searcher else question
     recent=[];notes={};seen={};exposed=set();serial=0;trace=[];checks=[];evictions=0
     coverage=[];retrieval=RetrievalProgress();policy_events=[];finalising=False;instructions=[];steering_retry=False
@@ -180,11 +180,9 @@ def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,st
             policy_events.append({'round':step+1,'reason':'reserved_final_response'})
             if on_event:on_event({'type':'phase','text':'Finalising answer from retrieved evidence'})
         model_started=time.perf_counter()
-        citation_ids=set()
-        for ident in visible:citation_ids.update(source_ids(seen[ident]))
-        use_grammar=hasattr(model,'complete_json') and (not getattr(model,'thinking',False) or first_turn_json and step==0)
-        schema=action_schema(citation_ids)
-        if finalising:schema={'anyOf':[item for item in schema['anyOf'] if item['properties']['action']['const']=='answer']}
+        use_grammar=first_turn_json and step==0
+        schema=action_schema() if use_grammar else None
+        if finalising and use_grammar:schema={'anyOf':[item for item in schema['anyOf'] if item['properties']['action']['const']=='answer']}
         response=constrained(model,prompt,schema,on_event) if use_grammar else model.complete(prompt,on_event=on_event) if on_event else model.complete(prompt)
         stages['model_seconds']+=time.perf_counter()-model_started
         checks.append({'reserved_total':response['reserved_total'],'usage':response.get('usage',{}),'timings':response.get('timings',{}),'finish_reason':response['choices'][0].get('finish_reason'),'model_response':response['choices'][0]['text'],'thinking':False if first_turn_json and step==0 else getattr(model,'thinking',False),'kind':'first_json' if first_turn_json and step==0 else 'normal','json_schema_constrained':response.get('json_schema_constrained')})
@@ -198,9 +196,9 @@ def _ask(library,model,question,max_rounds,note_tokens,on_event,system_prompt,st
         try:
             while True:
                 try:
-                    action=parse_format(response['choices'][0]['text']) if repair_invalid_json else parse_action(response['choices'][0]['text']);break
+                    action=parse_format(response['choices'][0]['text']) if repair_invalid_json and hasattr(model,'complete_json') else parse_action(response['choices'][0]['text']);break
                 except ValueError as error:
-                    if not repair_invalid_json or repairs>=2:raise
+                    if not repair_invalid_json or repairs>=1 or not hasattr(model,'complete_json'):raise
                     if getattr(model,'cancel_event',None) is not None and model.cancel_event.is_set():
                         return finish(status='cancelled',answer=None,trace=trace,context_checks=checks)
                     candidate=response['choices'][0]['text'];repairs+=1

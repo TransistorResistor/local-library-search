@@ -134,8 +134,8 @@ class App:
         ttk.Checkbutton(prefs,text='Open PDFs at known cited page',variable=self.vars['pdf_page_enabled']).grid(row=3,column=0,sticky='w')
         ttk.Combobox(prefs,textvariable=self.vars['pdf_viewer'],values=('acrobat','chrome'),state='readonly').grid(row=3,column=1,sticky='ew',padx=8)
         self.entry(prefs,4,'Viewer executable (blank = auto-detect)','pdf_executable',viewer.get('executable',''),'exe')
-        for row,key,label in [(5,'first_turn_json','Use non-thinking JSON for the first Ask response'),(6,'repair_invalid_json','Repair invalid Ask JSON (up to two formatting calls)')]:
-            self.vars[key]=tk.BooleanVar(value=self.raw.get('agent_options',{}).get(key,False))
+        for row,key,label in [(5,'first_turn_json','Use non-thinking JSON for the first Ask response'),(6,'repair_invalid_json','Repair invalid Ask JSON (one attempt per question)')]:
+            self.vars[key]=tk.BooleanVar(value=self.raw.get('agent_options',{}).get(key,key=='repair_invalid_json'))
             ttk.Checkbutton(prefs,text=label,variable=self.vars[key]).grid(row=row,column=0,columnspan=3,sticky='w')
         ttk.Label(preferences,text='Notebook space is part of the model context. Prompt edits apply on the next question.',wraplength=760).pack(anchor='w',pady=12)
         ttk.Label(preferences,text=f'Settings file: {self.path}',wraplength=760).pack(anchor='w')
@@ -622,7 +622,12 @@ class App:
             try:event=self.events.get_nowait()
             except queue.Empty:break
             if event['type']=='text':split(self.display_stream.feed(event['text']))
-            elif event['type']=='stream_end':split(self.display_stream.feed('',final=True))
+            elif event['type']=='stream_end':
+                split(self.display_stream.feed('',final=True))
+                rate=event.get('approx_decode_tokens_per_second')
+                if self.ask_active and rate is not None and self.trace_choice.get()=='Current turn':
+                    previous=self.timing_details.get('1.0','end-1c')
+                    self.replace_text(self.timing_details,previous+f'Generation {previous.count(chr(10))+1}: ~{rate:.1f} decode tok/s\n')
             elif event['type']=='round':
                 split(self.display_stream.feed('',final=True))
                 from .display_stream import DisplayStream
@@ -912,7 +917,7 @@ class App:
             clock['load_seconds']=time.perf_counter()-started
             started=time.perf_counter();library=self.get_library(config)
             clock['library_seconds']=time.perf_counter()-started
-            result=ask(library,model,question,on_event=self.emit,prompts_file=config.get('prompts_file'),reranker=self.loaded_reranker(config),note_tokens=config.get('agent_options',{}).get('note_tokens',6000),effort=config.get('agent_options',{}).get('effort','legacy'),steering=steering,conversation_history=prior,prior_evidence=prior_evidence,first_turn_json=config.get('agent_options',{}).get('first_turn_json',False),repair_invalid_json=config.get('agent_options',{}).get('repair_invalid_json',False))
+            result=ask(library,model,question,on_event=self.emit,prompts_file=config.get('prompts_file'),reranker=self.loaded_reranker(config),note_tokens=config.get('agent_options',{}).get('note_tokens',6000),effort=config.get('agent_options',{}).get('effort','legacy'),steering=steering,conversation_history=prior,prior_evidence=prior_evidence,first_turn_json=config.get('agent_options',{}).get('first_turn_json',False),repair_invalid_json=config.get('agent_options',{}).get('repair_invalid_json',True))
             result['timings']['load_seconds']=clock['load_seconds']
             trace=library.path.parent/'last-gui-search.json';clock['trace']=trace
             with self.trace_lock:trace.write_text(json.dumps(result,ensure_ascii=False,indent=2),'utf-8')
